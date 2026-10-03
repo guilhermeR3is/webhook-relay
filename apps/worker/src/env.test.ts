@@ -10,6 +10,7 @@ describe("loadEnv", () => {
   it("applies defaults for optional variables", () => {
     expect(loadEnv(validEnv)).toMatchObject({
       WORKER_PORT: 3001,
+      WORKER_POLL_INTERVAL_MS: 1000,
       LOG_LEVEL: "info",
       GIT_COMMIT: "unknown",
     });
@@ -17,6 +18,12 @@ describe("loadEnv", () => {
 
   it("converts the port to a number", () => {
     expect(loadEnv({ ...validEnv, WORKER_PORT: "4100" }).WORKER_PORT).toBe(4100);
+  });
+
+  it("rejects a poll interval that would hammer the database", () => {
+    expect(() => loadEnv({ ...validEnv, WORKER_POLL_INTERVAL_MS: "10" })).toThrow(
+      /WORKER_POLL_INTERVAL_MS/,
+    );
   });
 
   it("rejects a missing DATABASE_URL", () => {

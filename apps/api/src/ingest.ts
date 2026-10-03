@@ -1,4 +1,4 @@
-import { decryptSecret, saveEvent, type Db } from "@relay/db";
+import { decryptSecret, ingestEvent, type Db } from "@relay/db";
 import type { FastifyPluginCallback } from "fastify";
 import { extractEventMetadata } from "./event-metadata.js";
 import { verifySignature } from "./signature.js";
@@ -51,7 +51,7 @@ export const ingestRoutes: FastifyPluginCallback<IngestOptions> = (
         headers: request.headers,
         rawBody,
       });
-      const savedEvent = await saveEvent(db, {
+      const savedEvent = await ingestEvent(db, {
         endpointId: endpoint.id,
         idempotencyKey,
         eventType,

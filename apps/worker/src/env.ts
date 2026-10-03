@@ -6,6 +6,7 @@ const envSchema = z.object({
     error: "must decode to exactly 32 bytes",
   }),
   WORKER_PORT: z.coerce.number().int().min(1).max(65535).default(3001),
+  WORKER_POLL_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(1000),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   GIT_COMMIT: z.string().min(1).default("unknown"),
 });

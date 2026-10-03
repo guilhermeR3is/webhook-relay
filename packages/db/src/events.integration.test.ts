@@ -1,25 +1,11 @@
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { createDb, type Db } from "./client.js";
-import { saveEvent, type NewEvent } from "./events.js";
+import type { Db } from "./client.js";
+import { ingestEvent, saveEvent, type NewEvent } from "./events.js";
+import { startTestDatabase, type TestDatabase } from "./testing.js";
 
-const migrationsDir = join(import.meta.dirname, "../prisma/migrations");
-
-let container: StartedPostgreSqlContainer;
+let testDatabase: TestDatabase;
 let db: Db;
 let endpointId: string;
-
-async function applyMigrations() {
-  const migrationNames = readdirSync(migrationsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort();
-  for (const name of migrationNames) {
-    await db.$executeRawUnsafe(readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"));
-  }
-}
 
 function newEvent(overrides: Partial<NewEvent> = {}): NewEvent {
   return {
@@ -33,9 +19,8 @@ function newEvent(overrides: Partial<NewEvent> = {}): NewEvent {
 }
 
 beforeAll(async () => {
-  container = await new PostgreSqlContainer("postgres:17-alpine").start();
-  db = createDb(container.getConnectionUri());
-  await applyMigrations();
+  testDatabase = await startTestDatabase();
+  db = testDatabase.db;
   const endpoint = await db.endpoint.create({
     data: { slug: "github-main", name: "GitHub", signatureScheme: "none" },
   });
@@ -43,8 +28,7 @@ beforeAll(async () => {
 }, 120_000);
 
 afterAll(async () => {
-  await db.$disconnect();
-  await container.stop();
+  await testDatabase.stop();
 });
 
 describe("saveEvent", () => {
@@ -98,5 +82,109 @@ describe("saveEvent", () => {
     expect(new Set(results.map((saved) => saved.id)).size).toBe(1);
     const rows = await db.event.findMany({ where: { endpointId, idempotencyKey: "race" } });
     expect(rows).toHaveLength(1);
+  });
+});
+
+async function createEndpoint(slug: string) {
+  const endpoint = await db.endpoint.create({
+    data: { slug, name: slug, signatureScheme: "none" },
+  });
+  return endpoint.id;
+}
+
+function createDestination(
+  destinationEndpointId: string,
+  overrides: { eventTypes?: string[]; isActive?: boolean } = {},
+) {
+  return db.destination.create({
+    data: {
+      endpointId: destinationEndpointId,
+      url: "http://localhost:9999/hook",
+      secretEncrypted: "x",
+      eventTypes: ["push"],
+      ...overrides,
+    },
+  });
+}
+
+async function deliveredDestinationIds(eventId: string) {
+  const deliveries = await db.delivery.findMany({
+    where: { eventId },
+    select: { destinationId: true },
+  });
+  return deliveries.map((delivery) => delivery.destinationId).sort();
+}
+
+describe("ingestEvent", () => {
+  it("creates one delivery for each active destination subscribed to the event type", async () => {
+    const fanoutEndpointId = await createEndpoint("fanout");
+    const exact = await createDestination(fanoutEndpointId, { eventTypes: ["push"] });
+    const wildcard = await createDestination(fanoutEndpointId, { eventTypes: ["*"] });
+    await createDestination(fanoutEndpointId, { eventTypes: ["issues"] });
+    await createDestination(fanoutEndpointId, { eventTypes: [] });
+    await createDestination(fanoutEndpointId, { isActive: false });
+    await createDestination(await createEndpoint("fanout-other"));
+
+    const saved = await ingestEvent(db, newEvent({ endpointId: fanoutEndpointId }));
+
+    expect(saved.created).toBe(true);
+    expect(await deliveredDestinationIds(saved.id)).toEqual([exact.id, wildcard.id].sort());
+  });
+
+  it("saves the event with no deliveries when no destination matches", async () => {
+    const lonelyEndpointId = await createEndpoint("lonely");
+
+    const saved = await ingestEvent(db, newEvent({ endpointId: lonelyEndpointId }));
+
+    expect(saved.created).toBe(true);
+    expect(await db.delivery.count({ where: { eventId: saved.id } })).toBe(0);
+  });
+
+  it("does not create deliveries again when the event repeats", async () => {
+    const repeatEndpointId = await createEndpoint("repeat");
+    await createDestination(repeatEndpointId);
+    const first = await ingestEvent(db, newEvent({ endpointId: repeatEndpointId }));
+    await createDestination(repeatEndpointId);
+
+    const second = await ingestEvent(db, newEvent({ endpointId: repeatEndpointId }));
+
+    expect(second).toEqual({ id: first.id, created: false });
+    expect(await db.delivery.count({ where: { eventId: first.id } })).toBe(1);
+  });
+
+  it("keeps no event when creating its deliveries fails", async () => {
+    const failingEndpointId = await createEndpoint("failing");
+    await createDestination(failingEndpointId);
+    await db.$executeRawUnsafe(`
+      CREATE FUNCTION reject_delivery() RETURNS trigger AS $$
+      BEGIN RAISE EXCEPTION 'delivery rejected'; END $$ LANGUAGE plpgsql;
+      CREATE TRIGGER reject_delivery BEFORE INSERT ON delivery
+        FOR EACH ROW EXECUTE FUNCTION reject_delivery();
+    `);
+
+    try {
+      await expect(ingestEvent(db, newEvent({ endpointId: failingEndpointId }))).rejects.toThrow();
+    } finally {
+      await db.$executeRawUnsafe(`
+        DROP TRIGGER reject_delivery ON delivery;
+        DROP FUNCTION reject_delivery();
+      `);
+    }
+
+    expect(await db.event.count({ where: { endpointId: failingEndpointId } })).toBe(0);
+  });
+
+  it("creates one delivery per destination when 10 requests with the same key arrive at once", async () => {
+    const raceEndpointId = await createEndpoint("race");
+    await createDestination(raceEndpointId);
+    await createDestination(raceEndpointId);
+
+    const results = await Promise.all(
+      Array.from({ length: 10 }, () => ingestEvent(db, newEvent({ endpointId: raceEndpointId }))),
+    );
+
+    expect(results.filter((saved) => saved.created)).toHaveLength(1);
+    const eventId = results[0]?.id ?? "";
+    expect(await db.delivery.count({ where: { eventId } })).toBe(2);
   });
 });

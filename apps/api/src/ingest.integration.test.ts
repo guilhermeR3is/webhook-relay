@@ -1,28 +1,15 @@
 import { createHmac, randomBytes } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
-import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
-import { createDb, encryptSecret, type Db, type SignatureScheme } from "@relay/db";
+import { encryptSecret, type Db, type SignatureScheme } from "@relay/db";
+import { startTestDatabase, type TestDatabase } from "@relay/db/testing";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { buildApp } from "./app.js";
 
-const migrationsDir = join(import.meta.dirname, "../../../packages/db/prisma/migrations");
 const encryptionKey = randomBytes(32);
 const secret = "whsec_test";
 
-let container: StartedPostgreSqlContainer;
+let testDatabase: TestDatabase;
 let db: Db;
 let app: ReturnType<typeof buildApp>;
-
-async function applyMigrations() {
-  const migrationNames = readdirSync(migrationsDir, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory())
-    .map((entry) => entry.name)
-    .sort();
-  for (const name of migrationNames) {
-    await db.$executeRawUnsafe(readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"));
-  }
-}
 
 function createEndpoint(slug: string, signatureScheme: SignatureScheme, withSecret = true) {
   return db.endpoint.create({
@@ -53,17 +40,15 @@ function countEvents(slug: string) {
 }
 
 beforeAll(async () => {
-  container = await new PostgreSqlContainer("postgres:17-alpine").start();
-  db = createDb(container.getConnectionUri());
-  await applyMigrations();
+  testDatabase = await startTestDatabase();
+  db = testDatabase.db;
   app = buildApp({ db, encryptionKey, version: "test", commit: "test", logLevel: "silent" });
   await app.ready();
 }, 120_000);
 
 afterAll(async () => {
   await app.close();
-  await db.$disconnect();
-  await container.stop();
+  await testDatabase.stop();
 });
 
 describe("POST /in/:slug without signature", () => {
@@ -98,6 +83,28 @@ describe("POST /in/:slug without signature", () => {
     expect(second.statusCode).toBe(200);
     expect(second.json()).toEqual(first.json());
     expect(await countEvents("repeat")).toBe(1);
+  });
+
+  it("creates a delivery for the subscribed destination only on the first request", async () => {
+    const endpoint = await createEndpoint("with-destination", "none", false);
+    await db.destination.create({
+      data: {
+        endpointId: endpoint.id,
+        url: "http://localhost:9999/hook",
+        secretEncrypted: encryptSecret(secret, encryptionKey),
+        eventTypes: ["greeting"],
+      },
+    });
+    const headers = { "x-event-type": "greeting" };
+
+    const first = await post("with-destination", '{"n":1}', headers);
+    await post("with-destination", '{"n":1}', headers);
+
+    const deliveries = await db.delivery.findMany({
+      where: { event: { endpointId: endpoint.id } },
+    });
+    expect(deliveries).toHaveLength(1);
+    expect(deliveries[0]?.eventId).toBe(first.json<{ id: string }>().id);
   });
 
   it("treats the same Idempotency-Key as the same event even if the body changes", async () => {
