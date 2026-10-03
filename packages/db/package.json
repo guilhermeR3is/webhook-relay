@@ -16,15 +16,18 @@
     "generate": "prisma generate",
     "build": "prisma generate && tsc -p tsconfig.build.json",
     "typecheck": "prisma generate && tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run --exclude \"**/*.integration.test.ts\"",
     "migrate:dev": "prisma migrate dev",
-    "migrate:deploy": "prisma migrate deploy"
+    "migrate:deploy": "prisma migrate deploy",
+    "test:integration": "vitest run integration"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0"
   },
   "devDependencies": {
-    "prisma": "7.10.0"
+    "@testcontainers/postgresql": "12.2.0",
+    "prisma": "7.10.0",
+    "testcontainers": "12.2.0"
   }
 }

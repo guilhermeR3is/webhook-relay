@@ -11,9 +11,12 @@
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/main.js",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run --exclude \"**/*.integration.test.ts\"",
+    "test:integration": "vitest run integration"
   },
   "devDependencies": {
+    "@testcontainers/postgresql": "12.2.0",
+    "testcontainers": "12.2.0",
     "tsx": "4.23.15"
   },
   "dependencies": {

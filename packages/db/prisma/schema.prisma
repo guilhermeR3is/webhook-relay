@@ -8,3 +8,54 @@ generator client {
 datasource db {
   provider = "postgresql"
 }
+
+enum SignatureScheme {
+  none
+  generic_hmac
+  github
+
+  @@map("signature_scheme")
+}
+
+model Endpoint {
+  id              String          @id @default(uuid(7)) @db.Uuid
+  slug            String          @unique
+  name            String
+  signatureScheme SignatureScheme @map("signature_scheme")
+  secretEncrypted String?         @map("secret_encrypted")
+  createdAt       DateTime        @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  destinations Destination[]
+  events       Event[]
+
+  @@map("endpoint")
+}
+
+model Destination {
+  id              String   @id @default(uuid(7)) @db.Uuid
+  endpointId      String   @map("endpoint_id") @db.Uuid
+  url             String
+  secretEncrypted String   @map("secret_encrypted")
+  eventTypes      String[] @map("event_types")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  endpoint Endpoint @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+
+  @@map("destination")
+}
+
+model Event {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  endpointId     String   @map("endpoint_id") @db.Uuid
+  idempotencyKey String   @map("idempotency_key")
+  eventType      String   @map("event_type")
+  headers        Json
+  body           Bytes
+  receivedAt     DateTime @default(now()) @map("received_at") @db.Timestamptz(3)
+
+  endpoint Endpoint @relation(fields: [endpointId], references: [id], onDelete: Restrict)
+
+  @@unique([endpointId, idempotencyKey])
+  @@map("event")
+}

@@ -9,7 +9,13 @@ const { version } = JSON.parse(
 ) as { version: string };
 
 const db = createDb(env.DATABASE_URL);
-const app = buildApp({ db, version, commit: env.GIT_COMMIT, logLevel: env.LOG_LEVEL });
+const app = buildApp({
+  db,
+  encryptionKey: Buffer.from(env.ENCRYPTION_KEY, "base64"),
+  version,
+  commit: env.GIT_COMMIT,
+  logLevel: env.LOG_LEVEL,
+});
 
 // Sem isso o Docker espera 10 s e mata o processo com SIGKILL, cortando requisições em andamento
 for (const signal of ["SIGINT", "SIGTERM"] as const) {

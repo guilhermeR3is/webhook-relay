@@ -1,0 +1,67 @@
+import { decryptSecret, saveEvent, type Db } from "@relay/db";
+import type { FastifyPluginCallback } from "fastify";
+import { extractEventMetadata } from "./event-metadata.js";
+import { verifySignature } from "./signature.js";
+
+const MAX_BODY_BYTES = 1024 * 1024;
+
+type IngestOptions = {
+  db: Db;
+  encryptionKey: Buffer;
+};
+
+export const ingestRoutes: FastifyPluginCallback<IngestOptions> = (
+  app,
+  { db, encryptionKey },
+  done,
+) => {
+  // a assinatura cobre os bytes exatos; o parser padrão de JSON os descartaria
+  app.removeAllContentTypeParsers();
+  app.addContentTypeParser("*", { parseAs: "buffer" }, (_request, body, done) => {
+    done(null, body);
+  });
+
+  app.post<{ Params: { slug: string }; Body: Buffer | undefined }>(
+    "/in/:slug",
+    { bodyLimit: MAX_BODY_BYTES },
+    async (request, reply) => {
+      const { slug } = request.params;
+      const endpoint = await db.endpoint.findUnique({ where: { slug } });
+      if (endpoint === null) {
+        return reply.code(404).send({ error: "endpoint_not_found" });
+      }
+
+      const rawBody = Buffer.from(request.body ?? []);
+      const signatureCheck = verifySignature({
+        scheme: endpoint.signatureScheme,
+        secret:
+          endpoint.secretEncrypted === null
+            ? null
+            : decryptSecret(endpoint.secretEncrypted, encryptionKey),
+        rawBody,
+        headers: request.headers,
+      });
+      if (!signatureCheck.ok) {
+        request.log.warn({ slug, reason: signatureCheck.reason }, "signature rejected");
+        return reply.code(401).send({ error: "invalid_signature" });
+      }
+
+      const { idempotencyKey, eventType, storedHeaders } = extractEventMetadata({
+        scheme: endpoint.signatureScheme,
+        headers: request.headers,
+        rawBody,
+      });
+      const savedEvent = await saveEvent(db, {
+        endpointId: endpoint.id,
+        idempotencyKey,
+        eventType,
+        headers: storedHeaders,
+        body: rawBody,
+      });
+
+      return reply.code(savedEvent.created ? 202 : 200).send({ id: savedEvent.id });
+    },
+  );
+
+  done();
+};

@@ -1,14 +1,16 @@
-import { checkDatabase, type Queryable } from "@relay/db";
+import { checkDatabase, type Db } from "@relay/db";
 import Fastify from "fastify";
+import { ingestRoutes } from "./ingest.js";
 
 interface AppOptions {
-  db: Queryable;
+  db: Db;
+  encryptionKey: Buffer;
   version: string;
   commit: string;
   logLevel: string;
 }
 
-export function buildApp({ db, version, commit, logLevel }: AppOptions) {
+export function buildApp({ db, encryptionKey, version, commit, logLevel }: AppOptions) {
   const app = Fastify({ logger: { level: logLevel } });
 
   app.get("/health", async (_request, reply) => {
@@ -25,6 +27,8 @@ export function buildApp({ db, version, commit, logLevel }: AppOptions) {
       checks: { database: database.status },
     });
   });
+
+  void app.register(ingestRoutes, { db, encryptionKey });
 
   return app;
 }

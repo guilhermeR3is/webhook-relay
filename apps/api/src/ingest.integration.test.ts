@@ -1,0 +1,249 @@
+import { createHmac, randomBytes } from "node:crypto";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { PostgreSqlContainer, type StartedPostgreSqlContainer } from "@testcontainers/postgresql";
+import { createDb, encryptSecret, type Db, type SignatureScheme } from "@relay/db";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { buildApp } from "./app.js";
+
+const migrationsDir = join(import.meta.dirname, "../../../packages/db/prisma/migrations");
+const encryptionKey = randomBytes(32);
+const secret = "whsec_test";
+
+let container: StartedPostgreSqlContainer;
+let db: Db;
+let app: ReturnType<typeof buildApp>;
+
+async function applyMigrations() {
+  const migrationNames = readdirSync(migrationsDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name)
+    .sort();
+  for (const name of migrationNames) {
+    await db.$executeRawUnsafe(readFileSync(join(migrationsDir, name, "migration.sql"), "utf8"));
+  }
+}
+
+function createEndpoint(slug: string, signatureScheme: SignatureScheme, withSecret = true) {
+  return db.endpoint.create({
+    data: {
+      slug,
+      name: slug,
+      signatureScheme,
+      secretEncrypted: withSecret ? encryptSecret(secret, encryptionKey) : null,
+    },
+  });
+}
+
+function sign(body: Buffer | string) {
+  return `sha256=${createHmac("sha256", secret).update(body).digest("hex")}`;
+}
+
+function post(slug: string, body: Buffer | string, headers: Record<string, string> = {}) {
+  return app.inject({
+    method: "POST",
+    url: `/in/${slug}`,
+    headers: { "content-type": "application/json", ...headers },
+    payload: body,
+  });
+}
+
+function countEvents(slug: string) {
+  return db.event.count({ where: { endpoint: { slug } } });
+}
+
+beforeAll(async () => {
+  container = await new PostgreSqlContainer("postgres:17-alpine").start();
+  db = createDb(container.getConnectionUri());
+  await applyMigrations();
+  app = buildApp({ db, encryptionKey, version: "test", commit: "test", logLevel: "silent" });
+  await app.ready();
+}, 120_000);
+
+afterAll(async () => {
+  await app.close();
+  await db.$disconnect();
+  await container.stop();
+});
+
+describe("POST /in/:slug without signature", () => {
+  it("answers 202 with the event id and stores the body and the allowed headers", async () => {
+    await createEndpoint("open", "none", false);
+
+    const response = await post("open", '{"hello":"world"}', {
+      "x-event-type": "greeting",
+      authorization: "Bearer should-not-be-stored",
+    });
+
+    expect(response.statusCode).toBe(202);
+    const stored = await db.event.findUniqueOrThrow({
+      where: { id: response.json<{ id: string }>().id },
+    });
+    expect(Buffer.from(stored.body).toString()).toBe('{"hello":"world"}');
+    expect(stored.eventType).toBe("greeting");
+    expect(stored.headers).toEqual({
+      "content-type": "application/json",
+      "user-agent": "lightMyRequest",
+      "x-event-type": "greeting",
+    });
+  });
+
+  it("answers 200 with the original id and does not duplicate when the body repeats", async () => {
+    await createEndpoint("repeat", "none", false);
+
+    const first = await post("repeat", '{"n":1}');
+    const second = await post("repeat", '{"n":1}');
+
+    expect(first.statusCode).toBe(202);
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+    expect(await countEvents("repeat")).toBe(1);
+  });
+
+  it("treats the same Idempotency-Key as the same event even if the body changes", async () => {
+    await createEndpoint("keyed", "none", false);
+
+    const first = await post("keyed", '{"n":1}', { "idempotency-key": "order-42" });
+    const second = await post("keyed", '{"n":2}', { "idempotency-key": "order-42" });
+
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual(first.json());
+  });
+
+  it("accepts a body without content-type or content", async () => {
+    await createEndpoint("bare", "none", false);
+
+    const response = await app.inject({ method: "POST", url: "/in/bare" });
+
+    expect(response.statusCode).toBe(202);
+    const stored = await db.event.findUniqueOrThrow({
+      where: { id: response.json<{ id: string }>().id },
+    });
+    expect(stored.body).toHaveLength(0);
+  });
+
+  it("accepts a body of exactly 1 MiB and rejects one byte more with 413", async () => {
+    await createEndpoint("limit", "none", false);
+    const limit = 1024 * 1024;
+
+    const atLimit = await post("limit", Buffer.alloc(limit, "a"));
+    const overLimit = await post("limit", Buffer.alloc(limit + 1, "b"));
+
+    expect(atLimit.statusCode).toBe(202);
+    expect(overLimit.statusCode).toBe(413);
+    expect(await countEvents("limit")).toBe(1);
+  });
+
+  it("answers 404 for an unknown slug", async () => {
+    const response = await post("does-not-exist", "{}");
+
+    expect(response.statusCode).toBe(404);
+  });
+});
+
+describe("POST /in/:slug with generic_hmac", () => {
+  it("accepts a valid signature", async () => {
+    await createEndpoint("hmac-ok", "generic_hmac");
+    const body = '{"amount":10}';
+
+    const response = await post("hmac-ok", body, { "x-signature-256": sign(body) });
+
+    expect(response.statusCode).toBe(202);
+  });
+
+  it("verifies the signature over the exact bytes, including odd spacing and non-UTF-8", async () => {
+    await createEndpoint("hmac-bytes", "generic_hmac");
+    const body = Buffer.concat([Buffer.from('{ "a" :   1 }\n'), Buffer.from([0xff, 0xfe])]);
+
+    const response = await post("hmac-bytes", body, { "x-signature-256": sign(body) });
+
+    expect(response.statusCode).toBe(202);
+    const stored = await db.event.findUniqueOrThrow({
+      where: { id: response.json<{ id: string }>().id },
+    });
+    expect(Buffer.compare(stored.body, body)).toBe(0);
+  });
+
+  it("accepts a signed empty body", async () => {
+    await createEndpoint("hmac-empty", "generic_hmac");
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/in/hmac-empty",
+      headers: { "x-signature-256": sign("") },
+    });
+
+    expect(response.statusCode).toBe(202);
+  });
+
+  it.each([
+    ["missing", {}],
+    ["malformed", { "x-signature-256": "not-a-signature" }],
+    ["made with another secret", { "x-signature-256": `sha256=${"0".repeat(64)}` }],
+  ])("answers 401 and stores nothing when the signature is %s", async (problem, headers) => {
+    const slug = `hmac-bad-${problem.replaceAll(" ", "-")}`;
+    await createEndpoint(slug, "generic_hmac");
+
+    const response = await post(slug, '{"amount":10}', headers);
+
+    expect(response.statusCode).toBe(401);
+    expect(response.json()).toEqual({ error: "invalid_signature" });
+    expect(await countEvents(slug)).toBe(0);
+  });
+
+  it("rejects a valid signature when the body was altered", async () => {
+    await createEndpoint("hmac-tampered", "generic_hmac");
+
+    const response = await post("hmac-tampered", '{"amount":9999}', {
+      "x-signature-256": sign('{"amount":10}'),
+    });
+
+    expect(response.statusCode).toBe(401);
+  });
+});
+
+describe("POST /in/:slug with github", () => {
+  it("uses X-GitHub-Event and deduplicates by X-GitHub-Delivery", async () => {
+    await createEndpoint("gh", "github");
+    const headers = (body: string) => ({
+      "x-hub-signature-256": sign(body),
+      "x-github-event": "push",
+      "x-github-delivery": "delivery-1",
+    });
+
+    const first = await post("gh", '{"ref":"main"}', headers('{"ref":"main"}'));
+    const redelivery = await post(
+      "gh",
+      '{"ref":"main","redelivered":true}',
+      headers('{"ref":"main","redelivered":true}'),
+    );
+
+    expect(first.statusCode).toBe(202);
+    expect(redelivery.statusCode).toBe(200);
+    expect(redelivery.json()).toEqual(first.json());
+    const stored = await db.event.findUniqueOrThrow({
+      where: { id: first.json<{ id: string }>().id },
+    });
+    expect(stored.eventType).toBe("push");
+    expect(stored.idempotencyKey).toBe("delivery-1");
+  });
+
+  it("does not accept the generic header on a github endpoint", async () => {
+    await createEndpoint("gh-wrong-header", "github");
+
+    const response = await post("gh-wrong-header", "{}", { "x-signature-256": sign("{}") });
+
+    expect(response.statusCode).toBe(401);
+  });
+});
+
+describe("POST /in/:slug with a misconfigured endpoint", () => {
+  it("answers 500 when a signed endpoint has no secret", async () => {
+    await createEndpoint("no-secret", "generic_hmac", false);
+
+    const response = await post("no-secret", "{}", { "x-signature-256": sign("{}") });
+
+    expect(response.statusCode).toBe(500);
+    expect(await countEvents("no-secret")).toBe(0);
+  });
+});

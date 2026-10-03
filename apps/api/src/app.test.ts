@@ -1,9 +1,14 @@
+import { randomBytes } from "node:crypto";
+import { createDb } from "@relay/db";
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 
 function buildTestApp(queryRaw: () => Promise<unknown>) {
+  const db = createDb("postgresql://unused:unused@localhost:1/unused");
+  vi.spyOn(db, "$queryRaw").mockImplementation(queryRaw as never);
   return buildApp({
-    db: { $queryRaw: vi.fn(queryRaw) },
+    db,
+    encryptionKey: randomBytes(32),
     version: "1.2.3",
     commit: "a1b2c3d",
     logLevel: "silent",

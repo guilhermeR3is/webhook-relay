@@ -3,7 +3,10 @@ packages:
   - packages/*
 allowBuilds:
   "@prisma/engines": true
+  cpu-features: false
   esbuild: true
   prisma: true
+  protobufjs: false
+  ssh2: false
 minimumReleaseAgeExclude:
   - eslint@10.12.0
