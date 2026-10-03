@@ -31,14 +31,25 @@ model Endpoint {
   @@map("endpoint")
 }
 
+enum CircuitState {
+  closed
+  open
+  half_open
+
+  @@map("circuit_state")
+}
+
 model Destination {
-  id              String   @id @default(uuid(7)) @db.Uuid
-  endpointId      String   @map("endpoint_id") @db.Uuid
-  url             String
-  secretEncrypted String   @map("secret_encrypted")
-  eventTypes      String[] @map("event_types")
-  isActive        Boolean  @default(true) @map("is_active")
-  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  id                  String       @id @default(uuid(7)) @db.Uuid
+  endpointId          String       @map("endpoint_id") @db.Uuid
+  url                 String
+  secretEncrypted     String       @map("secret_encrypted")
+  eventTypes          String[]     @map("event_types")
+  isActive            Boolean      @default(true) @map("is_active")
+  circuitState        CircuitState @default(closed) @map("circuit_state")
+  consecutiveFailures Int          @default(0) @map("consecutive_failures")
+  circuitOpenedAt     DateTime?    @map("circuit_opened_at") @db.Timestamptz(3)
+  createdAt           DateTime     @default(now()) @map("created_at") @db.Timestamptz(3)
 
   endpoint   Endpoint   @relation(fields: [endpointId], references: [id], onDelete: Cascade)
   deliveries Delivery[]
@@ -85,8 +96,24 @@ model Delivery {
 
   event       Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
   destination Destination @relation(fields: [destinationId], references: [id], onDelete: Restrict)
+  attempts    Attempt[]
 
   @@unique([eventId, destinationId])
   @@index([status, nextAttemptAt])
   @@map("delivery")
+}
+
+model Attempt {
+  id              String   @id @default(uuid(7)) @db.Uuid
+  deliveryId      String   @map("delivery_id") @db.Uuid
+  startedAt       DateTime @map("started_at") @db.Timestamptz(3)
+  durationMs      Int      @map("duration_ms")
+  httpStatus      Int?     @map("http_status")
+  responseSnippet String?  @map("response_snippet")
+  error           String?
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryId, startedAt])
+  @@map("attempt")
 }

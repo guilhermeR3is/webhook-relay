@@ -7,9 +7,26 @@ export type ReservedDelivery = {
   attemptCount: number;
 };
 
+export type AttemptRecord = {
+  startedAt: Date;
+  durationMs: number;
+  httpStatus?: number;
+  responseSnippet?: string;
+};
+
+type Transaction = Pick<Db, "attempt" | "$executeRaw">;
+
 type ReserveOptions = { limit: number; leaseSeconds: number };
 
-type RescheduleOptions = { error: string; retryInSeconds: number };
+type CompleteOptions = { attempt: AttemptRecord };
+
+type RescheduleOptions = { attempt: AttemptRecord; error: string; retryInSeconds: number };
+
+type ReleaseOptions = { retryInSeconds: number };
+
+type BuryOptions = { attempt: AttemptRecord; error: string; deactivateDestination: boolean };
+
+const DESTINATION_DEACTIVATED = "destination deactivated after a 410 answer";
 
 // sem SKIP LOCKED, workers simultâneos reservam em dobro (sem trava) ou dão deadlock (só FOR UPDATE)
 export function reserveDeliveries(
@@ -36,28 +53,84 @@ export function reserveDeliveries(
 }
 
 // attempt_count na condição impede que um worker lento, com a posse expirada, sobrescreva a reserva nova
-export async function completeDelivery(
+export function completeDelivery(
   db: Db,
   { id, attemptCount }: ReservedDelivery,
+  { attempt }: CompleteOptions,
 ): Promise<boolean> {
-  const updatedRows = await db.$executeRaw`
-    UPDATE delivery
-    SET status = 'succeeded', succeeded_at = now(), locked_until = NULL, last_error = NULL
-    WHERE id = ${id}::uuid AND status = 'in_progress' AND attempt_count = ${attemptCount}::int`;
-  return updatedRows === 1;
+  return db.$transaction(async (tx) => {
+    const updatedRows = await tx.$executeRaw`
+      UPDATE delivery
+      SET status = 'succeeded', succeeded_at = now(), locked_until = NULL, last_error = NULL
+      WHERE id = ${id}::uuid AND status = 'in_progress' AND attempt_count = ${attemptCount}::int`;
+    await recordAttempt(tx, id, attempt, null);
+    return updatedRows === 1;
+  });
 }
 
-export async function rescheduleDelivery(
+export function rescheduleDelivery(
   db: Db,
   { id, attemptCount }: ReservedDelivery,
-  { error, retryInSeconds }: RescheduleOptions,
+  { attempt, error, retryInSeconds }: RescheduleOptions,
+): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    const updatedRows = await tx.$executeRaw`
+      UPDATE delivery
+      SET status = 'pending',
+          locked_until = NULL,
+          last_error = ${error},
+          next_attempt_at = now() + make_interval(secs => ${retryInSeconds}::double precision)
+      WHERE id = ${id}::uuid AND status = 'in_progress' AND attempt_count = ${attemptCount}::int`;
+    await recordAttempt(tx, id, attempt, error);
+    return updatedRows === 1;
+  });
+}
+
+// o destino não foi chamado, então a reserva não conta como tentativa
+export async function releaseDelivery(
+  db: Db,
+  { id, attemptCount }: ReservedDelivery,
+  { retryInSeconds }: ReleaseOptions,
 ): Promise<boolean> {
   const updatedRows = await db.$executeRaw`
     UPDATE delivery
     SET status = 'pending',
+        attempt_count = attempt_count - 1,
         locked_until = NULL,
-        last_error = ${error},
         next_attempt_at = now() + make_interval(secs => ${retryInSeconds}::double precision)
     WHERE id = ${id}::uuid AND status = 'in_progress' AND attempt_count = ${attemptCount}::int`;
   return updatedRows === 1;
+}
+
+export function buryDelivery(
+  db: Db,
+  { id, attemptCount, destinationId }: ReservedDelivery,
+  { attempt, error, deactivateDestination }: BuryOptions,
+): Promise<boolean> {
+  return db.$transaction(async (tx) => {
+    const updatedRows = await tx.$executeRaw`
+      UPDATE delivery
+      SET status = 'dead', locked_until = NULL, last_error = ${error}
+      WHERE id = ${id}::uuid AND status = 'in_progress' AND attempt_count = ${attemptCount}::int`;
+    await recordAttempt(tx, id, attempt, error);
+    const applied = updatedRows === 1;
+    if (applied && deactivateDestination) {
+      await tx.$executeRaw`UPDATE destination SET is_active = false WHERE id = ${destinationId}::uuid`;
+      await tx.$executeRaw`
+        UPDATE delivery
+        SET status = 'dead', locked_until = NULL, last_error = ${DESTINATION_DEACTIVATED}
+        WHERE destination_id = ${destinationId}::uuid AND status = 'pending'`;
+    }
+    return applied;
+  });
+}
+
+// o envio aconteceu de verdade, então a tentativa é gravada mesmo que a posse tenha sido perdida
+function recordAttempt(
+  tx: Transaction,
+  deliveryId: string,
+  attempt: AttemptRecord,
+  error: string | null,
+) {
+  return tx.attempt.create({ data: { deliveryId, ...attempt, error } });
 }

@@ -15,7 +15,6 @@ describe("startDeliveryLoop", () => {
       pollIntervalMs: 10,
       batchSize: 10,
       leaseSeconds: 60,
-      retryInSeconds: 10,
     });
     await vi.waitFor(
       () => {

@@ -16,6 +16,22 @@ describe("loadEnv", () => {
     });
   });
 
+  it("refuses private destinations unless told otherwise", () => {
+    expect(loadEnv(validEnv).ALLOW_PRIVATE_DESTINATIONS).toBe(false);
+    expect(
+      loadEnv({ ...validEnv, ALLOW_PRIVATE_DESTINATIONS: "true" }).ALLOW_PRIVATE_DESTINATIONS,
+    ).toBe(true);
+    expect(
+      loadEnv({ ...validEnv, ALLOW_PRIVATE_DESTINATIONS: "false" }).ALLOW_PRIVATE_DESTINATIONS,
+    ).toBe(false);
+  });
+
+  it("rejects a value that is not true or false instead of guessing", () => {
+    expect(() => loadEnv({ ...validEnv, ALLOW_PRIVATE_DESTINATIONS: "yes" })).toThrow(
+      /ALLOW_PRIVATE_DESTINATIONS/,
+    );
+  });
+
   it("converts the port to a number", () => {
     expect(loadEnv({ ...validEnv, WORKER_PORT: "4100" }).WORKER_PORT).toBe(4100);
   });

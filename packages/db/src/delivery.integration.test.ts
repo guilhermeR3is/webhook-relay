@@ -112,3 +112,95 @@ describe("delivery table", () => {
     });
   });
 });
+
+describe("attempt table", () => {
+  async function createDelivery() {
+    const event = await createEvent();
+    return db.delivery.create({ data: { eventId: event.id, destinationId } });
+  }
+
+  it("keeps the status and snippet of an answer and leaves the error empty", async () => {
+    const delivery = await createDelivery();
+
+    const attempt = await db.attempt.create({
+      data: {
+        deliveryId: delivery.id,
+        startedAt: new Date(),
+        durationMs: 120,
+        httpStatus: 503,
+        responseSnippet: "upstream unavailable",
+      },
+    });
+
+    expect(attempt).toMatchObject({
+      durationMs: 120,
+      httpStatus: 503,
+      responseSnippet: "upstream unavailable",
+      error: null,
+    });
+  });
+
+  it("keeps the error of a call that got no answer and leaves the status empty", async () => {
+    const delivery = await createDelivery();
+
+    const attempt = await db.attempt.create({
+      data: {
+        deliveryId: delivery.id,
+        startedAt: new Date(),
+        durationMs: 10_000,
+        error: "timed out after 10000 ms",
+      },
+    });
+
+    expect(attempt).toMatchObject({
+      httpStatus: null,
+      responseSnippet: null,
+      error: "timed out after 10000 ms",
+    });
+  });
+
+  it("refuses an attempt for a delivery that does not exist", async () => {
+    await expect(
+      db.attempt.create({
+        data: { deliveryId: randomUUID(), startedAt: new Date(), durationMs: 1, httpStatus: 200 },
+      }),
+    ).rejects.toMatchObject({ code: "P2003" });
+  });
+
+  it("deletes its attempts together with the event, through the delivery", async () => {
+    const delivery = await createDelivery();
+    await db.attempt.createMany({
+      data: [1, 2].map((durationMs) => ({
+        deliveryId: delivery.id,
+        startedAt: new Date(),
+        durationMs,
+        httpStatus: 500,
+      })),
+    });
+
+    await db.event.delete({ where: { id: delivery.eventId } });
+
+    expect(await db.attempt.count({ where: { deliveryId: delivery.id } })).toBe(0);
+  });
+});
+
+describe("destination circuit breaker columns", () => {
+  it("starts closed, with no failures and no opening time, even when inserted without Prisma", async () => {
+    const rows = await db.$queryRaw<
+      { circuit_state: string; consecutive_failures: number; circuit_opened_at: Date | null }[]
+    >`
+      INSERT INTO destination (id, endpoint_id, url, secret_encrypted, event_types)
+      VALUES (${randomUUID()}::uuid, ${endpointId}::uuid, 'http://localhost:9999/raw', 'x', ARRAY[]::text[])
+      RETURNING circuit_state, consecutive_failures, circuit_opened_at`;
+
+    expect(rows).toEqual([
+      { circuit_state: "closed", consecutive_failures: 0, circuit_opened_at: null },
+    ]);
+  });
+
+  it("refuses a circuit state outside closed, open and half_open", async () => {
+    await expect(
+      db.$executeRaw`UPDATE destination SET circuit_state = 'broken' WHERE id = ${destinationId}::uuid`,
+    ).rejects.toThrow(/circuit_state/);
+  });
+});

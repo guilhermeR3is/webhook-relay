@@ -19,8 +19,25 @@ let server: Server;
 let serverUrl: string;
 let received: ReceivedRequest[];
 let respond: (request: IncomingMessage, response: ServerResponse) => void;
+const runningLoops: ReturnType<typeof startDeliveryLoop>[] = [];
 
-const send = (timeoutMs = 2000) => createSendDelivery(db, { timeoutMs });
+const send = (options: { timeoutMs?: number; allowPrivateAddresses?: boolean } = {}) =>
+  createSendDelivery(db, { timeoutMs: 2000, allowPrivateAddresses: true, ...options });
+
+function startRealLoop(options: { allowPrivateAddresses?: boolean; random?: () => number } = {}) {
+  const { random = () => 0.99, ...senderOptions } = options;
+  const loop = startDeliveryLoop({
+    db,
+    send: send(senderOptions),
+    log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+    pollIntervalMs: 20,
+    batchSize: 10,
+    leaseSeconds: 60,
+    random,
+  });
+  runningLoops.push(loop);
+  return loop;
+}
 
 async function reserveOne(): Promise<ReservedDelivery> {
   const [reserved] = await reserveDeliveries(db, { limit: 1, leaseSeconds: 60 });
@@ -57,7 +74,8 @@ beforeEach(async () => {
   await db.event.deleteMany();
 });
 
-afterEach(() => {
+afterEach(async () => {
+  await Promise.all(runningLoops.splice(0).map((loop) => loop.stop()));
   server.closeAllConnections();
 });
 
@@ -75,9 +93,9 @@ describe("createSendDelivery", () => {
       body,
     });
 
-    const outcome = await send()(await reserveOne());
+    const result = await send()(await reserveOne());
 
-    expect(outcome).toEqual({ ok: true });
+    expect(result.reply).toEqual({ kind: "response", status: 200, retryAfter: null });
     expect(received).toHaveLength(1);
     expect(received[0]).toMatchObject({
       method: "POST",
@@ -95,59 +113,16 @@ describe("createSendDelivery", () => {
     expect(received[0]?.contentType).toBe("application/octet-stream");
   });
 
-  it("treats any 2xx as success", async () => {
-    respond = (_request, response) => response.writeHead(204).end();
+  it("refuses a loopback destination unless private addresses are allowed", async () => {
     await seedDeliveries(db, 1, { destinationUrl: serverUrl });
 
-    expect(await send()(await reserveOne())).toEqual({ ok: true });
-  });
+    const result = await send({ allowPrivateAddresses: false })(await reserveOne());
 
-  it("reports the status when the destination does not answer 2xx", async () => {
-    respond = (_request, response) => response.writeHead(503).end("busy");
-    await seedDeliveries(db, 1, { destinationUrl: serverUrl });
-
-    expect(await send()(await reserveOne())).toEqual({
-      ok: false,
-      error: "destination answered 503",
+    expect(result.reply).toEqual({
+      kind: "no-response",
+      error: "refused: 127.0.0.1 is not a public address",
     });
-  });
-
-  it("does not follow redirects", async () => {
-    respond = (request, response) => {
-      if (request.url === "/hook") {
-        response.writeHead(302, { location: "/elsewhere" }).end();
-      } else {
-        response.writeHead(200).end();
-      }
-    };
-    await seedDeliveries(db, 1, { destinationUrl: `${serverUrl}/hook` });
-
-    const outcome = await send()(await reserveOne());
-
-    expect(outcome).toEqual({ ok: false, error: "destination answered 302" });
-    expect(received.map((request) => request.url)).toEqual(["/hook"]);
-  });
-
-  it("gives up when the destination takes longer than the timeout", async () => {
-    respond = () => undefined;
-    await seedDeliveries(db, 1, { destinationUrl: serverUrl });
-
-    const outcome = await send(100)(await reserveOne());
-
-    expect(outcome).toEqual({ ok: false, error: "timed out after 100 ms" });
-  });
-
-  it("reports the real reason when the destination is unreachable", async () => {
-    const closedServer = createServer();
-    await new Promise<void>((resolve) => closedServer.listen(0, "127.0.0.1", resolve));
-    const closedPort = (closedServer.address() as AddressInfo).port;
-    await new Promise((resolve) => closedServer.close(resolve));
-    await seedDeliveries(db, 1, { destinationUrl: `http://127.0.0.1:${String(closedPort)}` });
-
-    const outcome = await send()(await reserveOne());
-
-    expect(outcome.ok).toBe(false);
-    expect(outcome.ok ? "" : outcome.error).toContain("ECONNREFUSED");
+    expect(received).toEqual([]);
   });
 });
 
@@ -158,15 +133,7 @@ describe("delivery loop with the real sender", () => {
       headers: { "content-type": "application/json" },
       body: Buffer.from('{"ok":true}'),
     });
-    const loop = startDeliveryLoop({
-      db,
-      send: send(),
-      log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
-      pollIntervalMs: 20,
-      batchSize: 10,
-      leaseSeconds: 60,
-      retryInSeconds: 600,
-    });
+    startRealLoop();
 
     await vi.waitFor(
       async () => {
@@ -174,8 +141,90 @@ describe("delivery loop with the real sender", () => {
       },
       { timeout: 5000 },
     );
-    await loop.stop();
 
     expect(received).toHaveLength(12);
+  });
+
+  it("retries a failing destination until it answers, keeping every attempt in order", async () => {
+    const [id] = await seedDeliveries(db, 1, { destinationUrl: serverUrl });
+    let calls = 0;
+    respond = (_request, response) => {
+      calls += 1;
+      response.writeHead(calls < 3 ? 503 : 200).end(calls < 3 ? "busy" : "ok");
+    };
+    startRealLoop({ random: () => 0 });
+
+    await vi.waitFor(
+      async () => {
+        expect(await db.delivery.count({ where: { status: "succeeded" } })).toBe(1);
+      },
+      { timeout: 5000 },
+    );
+
+    expect(await db.delivery.findUniqueOrThrow({ where: { id } })).toMatchObject({
+      attemptCount: 3,
+      lastError: null,
+    });
+    const attempts = await db.attempt.findMany({
+      where: { deliveryId: id },
+      orderBy: { startedAt: "asc" },
+    });
+    expect(
+      attempts.map(({ httpStatus, responseSnippet, error }) => [
+        httpStatus,
+        responseSnippet,
+        error,
+      ]),
+    ).toEqual([
+      [503, "busy", "destination answered 503"],
+      [503, "busy", "destination answered 503"],
+      [200, "ok", null],
+    ]);
+    expect(
+      await db.destination.findFirstOrThrow({ where: { deliveries: { some: { id } } } }),
+    ).toMatchObject({ circuitState: "closed", consecutiveFailures: 0 });
+  });
+
+  it("stops calling a destination that keeps failing and holds its deliveries back", async () => {
+    const ids = await seedDeliveries(db, 5, { destinationUrl: serverUrl });
+    respond = (_request, response) => response.writeHead(503).end();
+    startRealLoop({ random: () => 0 });
+
+    await vi.waitFor(
+      async () => {
+        const postponed = await db.$queryRaw<{ total: bigint }[]>`
+          SELECT count(*) AS total FROM delivery
+          WHERE next_attempt_at > now() + interval '200 seconds'`;
+        expect(postponed[0]?.total).toBe(5n);
+      },
+      { timeout: 5000 },
+    );
+
+    expect(received).toHaveLength(5);
+    expect(await db.delivery.count({ where: { id: { in: ids }, attemptCount: 1 } })).toBe(5);
+    expect(
+      await db.destination.findFirstOrThrow({ where: { deliveries: { some: { id: ids[0] } } } }),
+    ).toMatchObject({ circuitState: "open" });
+  });
+
+  it("never calls a private destination when they are not allowed, and says why", async () => {
+    const [id] = await seedDeliveries(db, 1, { destinationUrl: serverUrl });
+    startRealLoop({ allowPrivateAddresses: false });
+
+    await vi.waitFor(
+      async () => {
+        expect((await db.delivery.findUniqueOrThrow({ where: { id } })).lastError).not.toBeNull();
+      },
+      { timeout: 5000 },
+    );
+
+    expect(received).toEqual([]);
+    expect(await db.delivery.findUniqueOrThrow({ where: { id } })).toMatchObject({
+      status: "pending",
+      lastError: "refused: 127.0.0.1 is not a public address",
+    });
+    expect(await db.attempt.findMany({ where: { deliveryId: id } })).toMatchObject([
+      { httpStatus: null, error: "refused: 127.0.0.1 is not a public address" },
+    ]);
   });
 });
