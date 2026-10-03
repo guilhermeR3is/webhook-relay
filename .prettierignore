@@ -1,0 +1,7 @@
+.claude
+.impeccable
+pnpm-lock.yaml
+dist
+.next
+coverage
+**/generated

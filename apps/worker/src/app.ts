@@ -1,0 +1,30 @@
+import { checkDatabase, type Queryable } from "@relay/db";
+import Fastify from "fastify";
+
+interface AppOptions {
+  db: Queryable;
+  version: string;
+  commit: string;
+  logLevel: string;
+}
+
+export function buildApp({ db, version, commit, logLevel }: AppOptions) {
+  const app = Fastify({ logger: { level: logLevel } });
+
+  app.get("/health", async (_request, reply) => {
+    const database = await checkDatabase(db);
+    if (database.status === "error") {
+      app.log.error({ err: database.error }, "database health check failed");
+    }
+
+    const healthy = database.status === "ok";
+    return reply.code(healthy ? 200 : 503).send({
+      status: healthy ? "ok" : "degraded",
+      version,
+      commit,
+      checks: { database: database.status },
+    });
+  });
+
+  return app;
+}

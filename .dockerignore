@@ -1,0 +1,12 @@
+.git
+.claude
+.impeccable
+docs
+node_modules
+**/node_modules
+**/dist
+**/.next
+**/generated
+.env
+.env.*
+!.env.example

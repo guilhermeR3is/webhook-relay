@@ -1,0 +1,16 @@
+node_modules
+dist
+.next
+coverage
+*.tsbuildinfo
+.DS_Store
+
+.env
+.env.*
+!.env.example
+
+.claude/settings.local.json
+.impeccable/config.local.json
+**/generated
+next-env.d.ts
+docs/estudos.md
