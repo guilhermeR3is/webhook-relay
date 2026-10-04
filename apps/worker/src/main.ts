@@ -29,6 +29,7 @@ const deliveryLoop = startDeliveryLoop({
   send: createSendDelivery(db, {
     timeoutMs: SEND_TIMEOUT_MS,
     allowPrivateAddresses: env.ALLOW_PRIVATE_DESTINATIONS,
+    encryptionKey: Buffer.from(env.ENCRYPTION_KEY, "base64"),
   }),
   log: app.log,
   pollIntervalMs: env.WORKER_POLL_INTERVAL_MS,

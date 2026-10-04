@@ -4,6 +4,7 @@ import { createGuardedLookup, literalAddressRefusal } from "./address-guard.js";
 import type { DestinationReply } from "./retry-policy.js";
 
 const SNIPPET_BYTES = 2048;
+const USER_AGENT = "webhook-relay";
 
 export type PostResult = {
   reply: DestinationReply;
@@ -17,6 +18,7 @@ type PostOptions = {
   url: string;
   body: Uint8Array;
   contentType: string;
+  headers?: Record<string, string>;
   timeoutMs: number;
   allowPrivateAddresses: boolean;
 };
@@ -53,7 +55,7 @@ export async function postWebhook(options: PostOptions): Promise<PostResult> {
 }
 
 function sendRequest(
-  { url, body, contentType, allowPrivateAddresses }: PostOptions,
+  { url, body, contentType, headers, allowPrivateAddresses }: PostOptions,
   timeout: AbortSignal,
 ) {
   return new Promise<Answer>((resolve, reject) => {
@@ -63,7 +65,7 @@ function sendRequest(
       destination,
       {
         method: "POST",
-        headers: { "content-type": contentType },
+        headers: { "user-agent": USER_AGENT, ...headers, "content-type": contentType },
         // sem reaproveitar conexão: cada envio valida o IP de novo no connect
         agent: false,
         lookup: allowPrivateAddresses ? undefined : guardedLookup,

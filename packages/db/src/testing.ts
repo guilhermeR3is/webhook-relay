@@ -3,6 +3,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { PostgreSqlContainer } from "@testcontainers/postgresql";
 import { createDb, type Db } from "./client.js";
+import { encryptSecret } from "./crypto.js";
 
 const migrationsDir = join(import.meta.dirname, "../prisma/migrations");
 
@@ -34,8 +35,12 @@ export async function startTestDatabase() {
   };
 }
 
+export const testEncryptionKey = Buffer.alloc(32, 7);
+export const testDestinationSecret = `whsec_${Buffer.alloc(32, 9).toString("base64")}`;
+
 type SeedOptions = {
   destinationUrl?: string;
+  destinationSecret?: string;
   headers?: Record<string, string>;
   body?: Uint8Array<ArrayBuffer>;
 };
@@ -45,6 +50,7 @@ export async function seedDeliveries(
   count: number,
   {
     destinationUrl = "http://localhost:9999/hook",
+    destinationSecret = testDestinationSecret,
     headers = {},
     body = Buffer.from("{}"),
   }: SeedOptions = {},
@@ -56,7 +62,7 @@ export async function seedDeliveries(
     data: {
       endpointId: endpoint.id,
       url: destinationUrl,
-      secretEncrypted: "x",
+      secretEncrypted: encryptSecret(destinationSecret, testEncryptionKey),
       eventTypes: ["*"],
     },
   });

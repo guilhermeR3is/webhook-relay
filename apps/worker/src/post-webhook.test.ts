@@ -82,6 +82,41 @@ describe("postWebhook", () => {
     });
   });
 
+  it("sends the extra headers it was given and identifies itself", async () => {
+    const { url, received } = await startServer();
+
+    await postWebhook({ ...allowed, url, headers: { "webhook-id": "abc", "x-extra": "1" } });
+
+    expect(received[0]?.headers).toMatchObject({
+      "webhook-id": "abc",
+      "x-extra": "1",
+      "user-agent": "webhook-relay",
+    });
+  });
+
+  it("lets the extra headers replace the user agent but never the content type", async () => {
+    const { url, received } = await startServer();
+
+    await postWebhook({
+      ...allowed,
+      url,
+      headers: { "user-agent": "custom", "content-type": "text/plain" },
+    });
+
+    expect(received[0]?.headers["user-agent"]).toBe("custom");
+    expect(received[0]?.headers["content-type"]).toBe("application/json");
+  });
+
+  it("sends no extra headers when none are given", async () => {
+    const { url, received } = await startServer();
+
+    await postWebhook({ ...allowed, url });
+
+    expect(
+      Object.keys(received[0]?.headers ?? {}).filter((name) => name.startsWith("webhook-")),
+    ).toEqual([]);
+  });
+
   it("measures when the send started and how long it took", async () => {
     const before = Date.now();
     const { url } = await startServer((_request, response) => {
