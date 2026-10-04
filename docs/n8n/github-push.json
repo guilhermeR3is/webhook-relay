@@ -1,0 +1,145 @@
+{
+  "id": "relayGithubPush1",
+  "name": "Relay: eventos push do GitHub",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "github-push",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "da4a70b7-ae39-4c5c-9735-2c2421c42305",
+      "name": "Webhook do relay",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [0, 0],
+      "webhookId": "3fb4b49c-acf3-4621-9e62-741e40ef5c09"
+    },
+    {
+      "parameters": {
+        "jsCode": "const webhookId = $input.first().json.headers['webhook-id'];\nconst processed = $getWorkflowStaticData('global');\nprocessed.ids = processed.ids ?? {};\n\nconst duplicate = Object.hasOwn(processed.ids, webhookId);\nif (!duplicate) {\n  processed.ids[webhookId] = Date.now();\n  // sem teto a lista cresceria para sempre\n  const newest = Object.entries(processed.ids)\n    .sort((a, b) => b[1] - a[1])\n    .slice(0, 500);\n  processed.ids = Object.fromEntries(newest);\n}\n\nreturn [{ json: { webhookId, duplicate, body: $input.first().json.body } }];"
+      },
+      "id": "b809cadc-382e-4bba-8a41-5e7d6a2000a5",
+      "name": "Evitar duplicada",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "5082ddd4-e7f0-47ec-8ed2-f94b3a501484",
+              "leftValue": "={{ $json.duplicate }}",
+              "rightValue": "",
+              "operator": { "type": "boolean", "operation": "true", "singleValue": true }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "b1213102-fb0f-43d8-9605-5b364c2e12b5",
+      "name": "É duplicada?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true, duplicate: true, webhookId: $json.webhookId } }}",
+        "options": {}
+      },
+      "id": "46dc85dc-f48c-4ea5-9410-e73cc5b334b8",
+      "name": "Responder: já processada",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [680, -120]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "6a0c2b43-8a8e-4a1f-8d44-0c8c8f3a1001",
+              "name": "webhookId",
+              "value": "={{ $json.webhookId }}",
+              "type": "string"
+            },
+            {
+              "id": "6a0c2b43-8a8e-4a1f-8d44-0c8c8f3a1002",
+              "name": "repository",
+              "value": "={{ $json.body.repository.full_name }}",
+              "type": "string"
+            },
+            {
+              "id": "6a0c2b43-8a8e-4a1f-8d44-0c8c8f3a1003",
+              "name": "branch",
+              "value": "={{ $json.body.ref.replace('refs/heads/', '') }}",
+              "type": "string"
+            },
+            {
+              "id": "6a0c2b43-8a8e-4a1f-8d44-0c8c8f3a1004",
+              "name": "pusher",
+              "value": "={{ $json.body.pusher.name }}",
+              "type": "string"
+            },
+            {
+              "id": "6a0c2b43-8a8e-4a1f-8d44-0c8c8f3a1005",
+              "name": "commits",
+              "value": "={{ $json.body.commits.length }}",
+              "type": "number"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "4d9ecebf-738e-42d6-8b5c-6e3dbcc0d61b",
+      "name": "Resumir o push",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.5,
+      "position": [680, 120]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { received: true, duplicate: false, ...$json } }}",
+        "options": {}
+      },
+      "id": "6a0c2b43-8a8e-4a1f-8d44-0c8c8f3a1006",
+      "name": "Responder: processada",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [900, 120]
+    }
+  ],
+  "connections": {
+    "Webhook do relay": {
+      "main": [[{ "node": "Evitar duplicada", "type": "main", "index": 0 }]]
+    },
+    "Evitar duplicada": {
+      "main": [[{ "node": "É duplicada?", "type": "main", "index": 0 }]]
+    },
+    "É duplicada?": {
+      "main": [
+        [{ "node": "Responder: já processada", "type": "main", "index": 0 }],
+        [{ "node": "Resumir o push", "type": "main", "index": 0 }]
+      ]
+    },
+    "Resumir o push": {
+      "main": [[{ "node": "Responder: processada", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": { "executionOrder": "v1" },
+  "pinData": {}
+}

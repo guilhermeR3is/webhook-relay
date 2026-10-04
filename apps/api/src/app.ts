@@ -59,7 +59,7 @@ export function buildApp({
     );
   }
 
-  void app.register(ingestRoutes, { db, encryptionKey, metrics });
+  void app.register(ingestRoutes, { db, encryptionKey, demoEndpointSlug, metrics });
   void app.register(panelRoutes, { db, demoEndpointSlug });
   void app.register(flakyRoutes, {});
   void app.register(testEventRoutes, {

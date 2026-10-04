@@ -253,6 +253,59 @@ describe("POST /in/:slug with github", () => {
   });
 });
 
+describe("POST /in/:slug on the demo endpoint", () => {
+  it("refuses with 500 and stores nothing while the endpoint has no signature scheme", async () => {
+    await createEndpoint("demo", "none", false);
+
+    const response = await post("demo", '{"spam":true}');
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toEqual({ error: "demo_endpoint_unsigned" });
+    expect(await countEvents("demo")).toBe(0);
+  });
+
+  it("rejects a visitor who cannot sign and accepts a valid signature once it is signed", async () => {
+    await db.endpoint.update({
+      where: { slug: "demo" },
+      data: {
+        signatureScheme: "generic_hmac",
+        secretEncrypted: encryptSecret(secret, encryptionKey),
+      },
+    });
+    const body = '{"from":"the owner"}';
+
+    const unsigned = await post("demo", body);
+    const wrongSignature = await post("demo", body, { "x-signature-256": sign("another body") });
+    const signed = await post("demo", body, { "x-signature-256": sign(body) });
+
+    expect(unsigned.statusCode).toBe(401);
+    expect(wrongSignature.statusCode).toBe(401);
+    expect(signed.statusCode).toBe(202);
+    expect(await countEvents("demo")).toBe(1);
+  });
+
+  it("accepts the github scheme as well, since any signed scheme closes the door", async () => {
+    await db.endpoint.update({ where: { slug: "demo" }, data: { signatureScheme: "github" } });
+    const body = '{"ref":"main"}';
+
+    const response = await post("demo", body, {
+      "x-hub-signature-256": sign(body),
+      "x-github-event": "push",
+      "x-github-delivery": "demo-delivery-1",
+    });
+
+    expect(response.statusCode).toBe(202);
+  });
+
+  it("leaves other endpoints without signature working", async () => {
+    await createEndpoint("not-the-demo", "none", false);
+
+    const response = await post("not-the-demo", "{}");
+
+    expect(response.statusCode).toBe(202);
+  });
+});
+
 describe("POST /in/:slug with a misconfigured endpoint", () => {
   it("answers 500 when a signed endpoint has no secret", async () => {
     await createEndpoint("no-secret", "generic_hmac", false);

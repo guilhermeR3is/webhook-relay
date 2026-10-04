@@ -142,5 +142,18 @@ services:
       - ./load/k6:/scripts:ro
       - ./load/results:/results
 
+  n8n:
+    image: n8nio/n8n:2.41.6
+    profiles: [n8n]
+    environment:
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+    volumes:
+      - n8n-data:/home/node/.n8n
+      - ./docs/n8n:/workflows:ro
+    ports:
+      - "127.0.0.1:5678:5678"
+
 volumes:
   postgres-data:
+  n8n-data:

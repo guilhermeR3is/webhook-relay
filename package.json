@@ -12,7 +12,9 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test"
+    "test": "pnpm -r test",
+    "seed:demo": "pnpm --filter @relay/api seed:demo",
+    "endpoint:add": "pnpm --filter @relay/api endpoint:add"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

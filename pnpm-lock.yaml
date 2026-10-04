@@ -52,6 +52,22 @@ importers:
         specifier: 4.23.15
         version: 4.23.15
 
+  apps/server:
+    dependencies:
+      '@relay/api':
+        specifier: workspace:*
+        version: link:../api
+      '@relay/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@relay/worker':
+        specifier: workspace:*
+        version: link:../worker
+    devDependencies:
+      tsx:
+        specifier: 4.23.15
+        version: 4.23.15
+
   apps/web:
     dependencies:
       '@tailwindcss/postcss':

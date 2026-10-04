@@ -1,0 +1,47 @@
+# Passo a passo da publicação em docs/publicacao.md
+services:
+  - type: web
+    name: relay-server
+    runtime: docker
+    plan: free
+    # mesma região do projeto no Neon, porque o worker consulta o banco a cada segundo
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    # só publica commit com o CI verde
+    autoDeployTrigger: checksPass
+    envVars:
+      # o Render repassa as variáveis como ARG do Docker; esta escolhe o estágio final do Dockerfile
+      - key: RELAY_TARGET
+        value: server
+      # endereço pooled do Neon (o que tem -pooler no nome)
+      - key: DATABASE_URL
+        sync: false
+      # mesma chave usada no pnpm seed:demo: openssl rand -base64 32
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: DEMO_QUOTA_SALT
+        generateValue: true
+      # endereço público do painel (relay-web), sem barra no fim
+      - key: PANEL_ORIGIN
+        sync: false
+
+  - type: web
+    name: relay-web
+    runtime: docker
+    plan: free
+    region: ohio
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    healthCheckPath: /health
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: RELAY_TARGET
+        value: web
+      # endereço público da API (relay-server), que o painel consulta no servidor
+      - key: API_URL
+        sync: false
+      # o mesmo endereço, usado pelo navegador no botão de evento de teste
+      - key: PUBLIC_API_URL
+        sync: false

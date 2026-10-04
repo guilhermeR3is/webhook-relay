@@ -32,6 +32,7 @@ export {
   type DemoQuotaResult,
   type QuotaUse,
 } from "./demo-quota.js";
+export { deleteExpiredDemoData } from "./demo-cleanup.js";
 export { resendDeliveries, type ResendResult, type ResendSkipReason } from "./resend.js";
 export {
   buryDelivery,

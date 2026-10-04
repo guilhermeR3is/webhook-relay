@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { createDb } from "@relay/db";
-import { buildApp } from "./app.js";
 import { loadEnv } from "./env.js";
+import { startApi } from "./start.js";
 
 const env = loadEnv();
 const { version } = JSON.parse(
@@ -9,24 +9,11 @@ const { version } = JSON.parse(
 ) as { version: string };
 
 const db = createDb(env.DATABASE_URL);
-const app = buildApp({
-  db,
-  encryptionKey: Buffer.from(env.ENCRYPTION_KEY, "base64"),
-  demoEndpointSlug: env.DEMO_ENDPOINT_SLUG,
-  demoQuotaSalt: env.DEMO_QUOTA_SALT,
-  panelOrigin: env.PANEL_ORIGIN,
-  trustProxy: env.TRUST_PROXY,
-  exposeMetrics: env.METRICS_ENABLED,
-  version,
-  commit: env.GIT_COMMIT,
-  logLevel: env.LOG_LEVEL,
-});
+const api = await startApi(env, db, version);
 
 // Sem isso o Docker espera 10 s e mata o processo com SIGKILL, cortando requisições em andamento
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {
-    void app.close().then(() => db.$disconnect());
+    void api.stop().then(() => db.$disconnect());
   });
 }
-
-await app.listen({ port: env.API_PORT, host: "0.0.0.0" });

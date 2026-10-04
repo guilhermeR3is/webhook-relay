@@ -9,12 +9,13 @@ const MAX_BODY_BYTES = 1024 * 1024;
 type IngestOptions = {
   db: Db;
   encryptionKey: Buffer;
+  demoEndpointSlug: string;
   metrics: Pick<ApiMetrics, "eventsReceived" | "ingestDuration">;
 };
 
 export const ingestRoutes: FastifyPluginCallback<IngestOptions> = (
   app,
-  { db, encryptionKey, metrics },
+  { db, encryptionKey, demoEndpointSlug, metrics },
   done,
 ) => {
   // a assinatura cobre os bytes exatos; o parser padrão de JSON os descartaria
@@ -37,6 +38,11 @@ export const ingestRoutes: FastifyPluginCallback<IngestOptions> = (
       if (endpoint === null) {
         metrics.eventsReceived.inc({ result: "unknown_endpoint" });
         return reply.code(404).send({ error: "endpoint_not_found" });
+      }
+      // o painel mostra tudo o que entra neste endpoint, então ele não pode aceitar texto de qualquer visitante
+      if (slug === demoEndpointSlug && endpoint.signatureScheme === "none") {
+        request.log.error({ slug }, "demo endpoint has no signature scheme, refusing the request");
+        return reply.code(500).send({ error: "demo_endpoint_unsigned" });
       }
 
       const rawBody = Buffer.from(request.body ?? []);
