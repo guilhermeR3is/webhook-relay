@@ -1,6 +1,8 @@
+import { Registry } from "@prometheus-io/client";
 import { createDb } from "@relay/db";
 import { describe, expect, it, vi } from "vitest";
 import { startDeliveryLoop } from "./delivery-loop.js";
+import { createDeliveryMetrics } from "./metrics.js";
 
 describe("startDeliveryLoop", () => {
   it("logs the failure and keeps polling while the database is unreachable", async () => {
@@ -15,6 +17,7 @@ describe("startDeliveryLoop", () => {
       pollIntervalMs: 10,
       batchSize: 10,
       leaseSeconds: 60,
+      metrics: createDeliveryMetrics(new Registry()),
     });
     await vi.waitFor(
       () => {

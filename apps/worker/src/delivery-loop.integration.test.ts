@@ -1,14 +1,17 @@
 import { setTimeout as sleep } from "node:timers/promises";
+import { Registry } from "@prometheus-io/client";
 import { seedDeliveries, startTestDatabase, type TestDatabase } from "@relay/db/testing";
 import { createDb, reserveDeliveries, resendDeliveries, type Db } from "@relay/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startDeliveryLoop, type SendDelivery } from "./delivery-loop.js";
+import { createDeliveryMetrics, type DeliveryMetrics } from "./metrics.js";
 import type { PostResult } from "./post-webhook.js";
 
 const silentLog = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
 
 let testDatabase: TestDatabase;
 let db: Db;
+let metrics: DeliveryMetrics;
 const runningLoops: ReturnType<typeof startDeliveryLoop>[] = [];
 const extraClients: Db[] = [];
 
@@ -40,6 +43,7 @@ function startLoop(send: SendDelivery, overrides: LoopOverrides = {}) {
     pollIntervalMs: 20,
     batchSize: 10,
     leaseSeconds: 60,
+    metrics,
     random: () => 0.99,
     ...overrides,
   });
@@ -105,6 +109,7 @@ beforeAll(async () => {
 
 beforeEach(async () => {
   vi.clearAllMocks();
+  metrics = createDeliveryMetrics(new Registry());
   await db.delivery.deleteMany();
   await db.event.deleteMany();
 });
@@ -475,5 +480,112 @@ describe("two workers on the same queue", () => {
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(await db.delivery.count({ where: { status: "succeeded" } })).toBe(1);
+  });
+});
+
+async function deliveriesCounted(result: string) {
+  const { values } = await metrics.deliveries.get();
+  return values.find((entry) => entry.labels.result === result)?.value ?? 0;
+}
+
+async function secondsTimed(statusClass: string) {
+  const { values } = await metrics.sendDuration.get();
+  const total = values.find(
+    (entry) =>
+      entry.metricName === "relay_send_duration_seconds_sum" &&
+      entry.labels.status_class === statusClass,
+  );
+  return total?.value ?? 0;
+}
+
+async function sendsTimed(statusClass: string) {
+  const { values } = await metrics.sendDuration.get();
+  const total = values.find(
+    (entry) =>
+      entry.metricName === "relay_send_duration_seconds_count" &&
+      entry.labels.status_class === statusClass,
+  );
+  return total?.value ?? 0;
+}
+
+function waitForCount(result: string, expected: number) {
+  return vi.waitFor(
+    async () => {
+      expect(await deliveriesCounted(result)).toBe(expected);
+    },
+    { timeout: 5000 },
+  );
+}
+
+describe("what the loop counts", () => {
+  it("counts each succeeded delivery and times each send under its status class", async () => {
+    await seedDeliveries(db, 3);
+
+    startLoop(accepted);
+    await waitForCount("succeeded", 3);
+
+    expect(await sendsTimed("2xx")).toBe(3);
+    // cada envio de teste durou 5 ms, e o histograma guarda segundos
+    expect(await secondsTimed("2xx")).toBeCloseTo(0.015, 6);
+  });
+
+  it("counts a 5xx as retried and a 4xx as dead, each under its own status class", async () => {
+    await seedDeliveries(db, 2);
+    const [retriedId] = await db.delivery.findMany({
+      select: { id: true },
+      orderBy: { id: "asc" },
+    });
+
+    startLoop((delivery) => Promise.resolve(answered(delivery.id === retriedId?.id ? 503 : 400)));
+    await waitForCount("retried", 1);
+    await waitForCount("dead", 1);
+
+    expect(await sendsTimed("5xx")).toBe(1);
+    expect(await sendsTimed("4xx")).toBe(1);
+  });
+
+  it("counts a send that throws as retried, under the status class none", async () => {
+    await seedOneDelivery();
+
+    startLoop(() => {
+      throw new Error("boom");
+    });
+    await waitForCount("retried", 1);
+
+    expect(await sendsTimed("none")).toBe(1);
+  });
+
+  it("counts a delivery to a paused destination as postponed, without timing a send", async () => {
+    const id = await seedOneDelivery();
+    await db.destination.update({
+      where: { id: await destinationOf(id) },
+      data: { circuitState: "open", circuitOpenedAt: new Date() },
+    });
+
+    startLoop(accepted);
+    await waitForCount("postponed", 1);
+
+    expect(await sendsTimed("2xx")).toBe(0);
+  });
+
+  it("counts a result as lease_lost when the delivery was taken over during the send", async () => {
+    const id = await seedOneDelivery();
+
+    startLoop(async () => {
+      await db.delivery.update({ where: { id }, data: { attemptCount: { increment: 1 } } });
+      return answered(200);
+    });
+    await waitForCount("lease_lost", 1);
+
+    expect(await deliveriesCounted("succeeded")).toBe(0);
+  });
+
+  it("counts a failure to record the result as error", async () => {
+    await seedOneDelivery();
+
+    startLoop(() => Promise.resolve({ ...answered(200), durationMs: 2 ** 31 }));
+    await waitForCount("error", 1);
+
+    expect(await deliveriesCounted("succeeded")).toBe(0);
   });
 });

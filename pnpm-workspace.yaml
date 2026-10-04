@@ -1,6 +1,7 @@
 packages:
   - apps/*
   - packages/*
+  - load
 allowBuilds:
   "@prisma/engines": true
   cpu-features: false

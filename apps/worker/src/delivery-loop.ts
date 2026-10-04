@@ -13,6 +13,7 @@ import {
   type ReservedDelivery,
 } from "@relay/db";
 import type { FastifyBaseLogger } from "fastify";
+import { statusClass, type DeliveryMetrics } from "./metrics.js";
 import type { PostResult } from "./post-webhook.js";
 import { decideDelivery, type CircuitSignal, type DeliveryDecision } from "./retry-policy.js";
 
@@ -25,6 +26,7 @@ type DeliveryLoopOptions = {
   pollIntervalMs: number;
   batchSize: number;
   leaseSeconds: number;
+  metrics: DeliveryMetrics;
   random?: () => number;
 };
 
@@ -61,7 +63,7 @@ async function runLoop(options: DeliveryLoopOptions, stopSignal: AbortSignal) {
 }
 
 async function processDelivery(options: DeliveryLoopOptions, delivery: ReservedDelivery) {
-  const { db, log } = options;
+  const { db, log, metrics } = options;
   try {
     const admission = await admitSend(db, delivery.destinationId);
     if (admission.kind === "wait") {
@@ -76,6 +78,10 @@ async function processDelivery(options: DeliveryLoopOptions, delivery: ReservedD
     }
 
     const result = await sendSafely(options, delivery);
+    metrics.sendDuration.observe(
+      { status_class: statusClass(result.httpStatus) },
+      result.durationMs / 1000,
+    );
     const decision = decideDelivery({
       reply: result.reply,
       attempt: delivery.attemptCount,
@@ -84,21 +90,24 @@ async function processDelivery(options: DeliveryLoopOptions, delivery: ReservedD
     await recordDecision(options, delivery, result, decision);
     await recordCircuit(options, delivery.destinationId, decision.circuitSignal);
   } catch (error) {
+    metrics.deliveries.inc({ result: "error" });
     // sem registrar o resultado, a posse expira e outra tentativa acontece (pelo menos uma vez)
     log.error({ err: error, deliveryId: delivery.id }, "failed to process the delivery");
   }
 }
 
 async function postpone(
-  { db, log }: DeliveryLoopOptions,
+  { db, log, metrics }: DeliveryLoopOptions,
   delivery: ReservedDelivery,
   retryInSeconds: number,
 ) {
   const released = await releaseDelivery(db, delivery, { retryInSeconds });
   const fields = { deliveryId: delivery.id, destinationId: delivery.destinationId, retryInSeconds };
   if (released) {
+    metrics.deliveries.inc({ result: "postponed" });
     log.info(fields, "destination is paused, delivery postponed");
   } else {
+    metrics.deliveries.inc({ result: "lease_lost" });
     log.warn(fields, "lease lost before the delivery could be postponed");
   }
 }
@@ -121,8 +130,10 @@ async function sendSafely({ send, log }: DeliveryLoopOptions, delivery: Reserved
   }
 }
 
+const RESULT_BY_ACTION = { succeed: "succeeded", retry: "retried", dead: "dead" } as const;
+
 async function recordDecision(
-  { db, log }: DeliveryLoopOptions,
+  { db, log, metrics }: DeliveryLoopOptions,
   delivery: ReservedDelivery,
   { startedAt, durationMs, httpStatus, responseSnippet }: PostResult,
   decision: DeliveryDecision,
@@ -135,6 +146,7 @@ async function recordDecision(
     action: decision.action,
     httpStatus,
   };
+  metrics.deliveries.inc({ result: recorded ? RESULT_BY_ACTION[decision.action] : "lease_lost" });
   if (!recorded) {
     log.warn(fields, "lease lost before the result was recorded");
   } else if (decision.action === "dead") {

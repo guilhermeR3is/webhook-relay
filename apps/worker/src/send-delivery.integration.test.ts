@@ -7,6 +7,7 @@ import {
 } from "node:http";
 import { createHmac } from "node:crypto";
 import type { AddressInfo } from "node:net";
+import { Registry } from "@prometheus-io/client";
 import { reserveDeliveries, type Db, type ReservedDelivery } from "@relay/db";
 import {
   seedDeliveries,
@@ -17,6 +18,7 @@ import {
 } from "@relay/db/testing";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startDeliveryLoop } from "./delivery-loop.js";
+import { createDeliveryMetrics } from "./metrics.js";
 import { createSendDelivery } from "./send-delivery.js";
 
 type ReceivedRequest = {
@@ -52,6 +54,7 @@ function startRealLoop(options: { allowPrivateAddresses?: boolean; random?: () =
     pollIntervalMs: 20,
     batchSize: 10,
     leaseSeconds: 60,
+    metrics: createDeliveryMetrics(new Registry()),
     random,
   });
   runningLoops.push(loop);

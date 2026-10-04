@@ -25,6 +25,7 @@ services:
       # dentro da rede do compose o banco é "postgres:5432"; sobrescreve o valor do .env
       DATABASE_URL: postgresql://relay:relay@postgres:5432/relay
       GIT_COMMIT: ${GIT_COMMIT:-dev}
+      METRICS_ENABLED: "true"
     ports:
       - "3000:3000"
     depends_on:
@@ -50,6 +51,9 @@ services:
     environment:
       DATABASE_URL: postgresql://relay:relay@postgres:5432/relay
       GIT_COMMIT: ${GIT_COMMIT:-dev}
+      METRICS_ENABLED: "true"
+    # um envio em andamento pode levar 10 s; com o prazo padrão do Docker (10 s) o SIGKILL cortaria o desligamento limpo
+    stop_grace_period: 20s
     ports:
       - "3001:3001"
     depends_on:
@@ -88,6 +92,55 @@ services:
       interval: 10s
       timeout: 3s
       retries: 3
+
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    profiles: [observability]
+    volumes:
+      - ./observability/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+
+  grafana:
+    image: grafana/grafana:13.2.3
+    profiles: [observability]
+    environment:
+      # só local: quem abre o endereço vê os gráficos sem login
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./observability/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      # 3200 no host porque a API usa a 3000
+      - "127.0.0.1:3200:3000"
+    depends_on:
+      - prometheus
+
+  receiver:
+    image: node:24-alpine
+    profiles: [load]
+    # o repositório inteiro, porque o node_modules do pnpm é feito de links relativos
+    working_dir: /app/load
+    volumes:
+      - .:/app:ro
+    command: ["node", "src/receiver-main.ts"]
+    environment:
+      RECEIVER_DELAY_MS: ${RECEIVER_DELAY_MS:-0}
+    ports:
+      - "127.0.0.1:4000:4000"
+
+  k6:
+    image: grafana/k6:1.8.0
+    profiles: [k6]
+    command: ["run", "--summary-export=/results/summary.json", "/scripts/ingest.js"]
+    environment:
+      TARGET_URL: http://api:3000
+      RATE: ${RATE:-200}
+      DURATION: ${DURATION:-2m}
+    volumes:
+      - ./load/k6:/scripts:ro
+      - ./load/results:/results
 
 volumes:
   postgres-data:

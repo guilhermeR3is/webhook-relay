@@ -26,6 +26,12 @@ describe("loadEnv", () => {
     ).toBe(false);
   });
 
+  it("keeps the metrics endpoint off unless told otherwise", () => {
+    expect(loadEnv(validEnv).METRICS_ENABLED).toBe(false);
+    expect(loadEnv({ ...validEnv, METRICS_ENABLED: "true" }).METRICS_ENABLED).toBe(true);
+    expect(() => loadEnv({ ...validEnv, METRICS_ENABLED: "1" })).toThrow(/METRICS_ENABLED/);
+  });
+
   it("rejects a value that is not true or false instead of guessing", () => {
     expect(() => loadEnv({ ...validEnv, ALLOW_PRIVATE_DESTINATIONS: "yes" })).toThrow(
       /ALLOW_PRIVATE_DESTINATIONS/,

@@ -1,26 +1,22 @@
 {
-  "name": "@relay/worker",
+  "name": "@relay/load",
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "files": [
-    "dist"
-  ],
   "scripts": {
-    "dev": "tsx watch --env-file=../../.env src/main.ts",
-    "build": "tsc -p tsconfig.build.json",
-    "start": "node dist/main.js",
+    "seed": "tsx --env-file=../.env src/seed.ts",
+    "unseed": "tsx --env-file=../.env src/seed.ts unseed",
+    "receiver": "node src/receiver-main.ts",
+    "chaos": "tsx --env-file=../.env src/chaos.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude \"**/*.integration.test.ts\"",
     "test:integration": "vitest run integration --testTimeout=30000"
   },
+  "dependencies": {
+    "@relay/db": "workspace:*",
+    "zod": "4.6.5"
+  },
   "devDependencies": {
     "tsx": "4.23.15"
-  },
-  "dependencies": {
-    "@prometheus-io/client": "0.16.1",
-    "@relay/db": "workspace:*",
-    "fastify": "5.12.5",
-    "zod": "4.6.5"
   }
 }

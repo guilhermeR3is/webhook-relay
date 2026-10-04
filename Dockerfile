@@ -9,6 +9,7 @@ COPY apps/api/package.json apps/api/
 COPY apps/worker/package.json apps/worker/
 COPY apps/web/package.json apps/web/
 COPY packages/db/package.json packages/db/
+COPY load/package.json load/
 RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile
 COPY . .
 # prisma generate exige a variável mesmo sem conectar; o valor real só existe em execução

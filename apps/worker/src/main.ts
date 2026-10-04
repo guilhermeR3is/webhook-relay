@@ -3,6 +3,7 @@ import { createDb } from "@relay/db";
 import { buildApp } from "./app.js";
 import { startDeliveryLoop } from "./delivery-loop.js";
 import { loadEnv } from "./env.js";
+import { createWorkerMetrics } from "./metrics.js";
 import { createSendDelivery } from "./send-delivery.js";
 
 const BATCH_SIZE = 10;
@@ -16,7 +17,14 @@ const { version } = JSON.parse(
 ) as { version: string };
 
 const db = createDb(env.DATABASE_URL);
-const app = buildApp({ db, version, commit: env.GIT_COMMIT, logLevel: env.LOG_LEVEL });
+const metrics = createWorkerMetrics(db);
+const app = buildApp({
+  db,
+  metricsRegistry: env.METRICS_ENABLED ? metrics.registry : undefined,
+  version,
+  commit: env.GIT_COMMIT,
+  logLevel: env.LOG_LEVEL,
+});
 
 await app.listen({ port: env.WORKER_PORT, host: "0.0.0.0" });
 
@@ -35,6 +43,7 @@ const deliveryLoop = startDeliveryLoop({
   pollIntervalMs: env.WORKER_POLL_INTERVAL_MS,
   batchSize: BATCH_SIZE,
   leaseSeconds: LEASE_SECONDS,
+  metrics,
 });
 
 // Sem isso o Docker espera 10 s e mata o processo com SIGKILL, cortando requisições e envios em andamento

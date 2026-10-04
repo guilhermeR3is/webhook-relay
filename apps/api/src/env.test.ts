@@ -24,6 +24,12 @@ describe("loadEnv", () => {
     expect(() => loadEnv({ ...validEnv, DEMO_ENDPOINT_SLUG: "" })).toThrow(/DEMO_ENDPOINT_SLUG/);
   });
 
+  it("keeps the metrics endpoint off unless told otherwise", () => {
+    expect(loadEnv(validEnv).METRICS_ENABLED).toBe(false);
+    expect(loadEnv({ ...validEnv, METRICS_ENABLED: "true" }).METRICS_ENABLED).toBe(true);
+    expect(() => loadEnv({ ...validEnv, METRICS_ENABLED: "1" })).toThrow(/METRICS_ENABLED/);
+  });
+
   it("converts the port to a number", () => {
     expect(loadEnv({ ...validEnv, API_PORT: "4100" }).API_PORT).toBe(4100);
   });

@@ -1,14 +1,16 @@
+import type { Registry } from "@prometheus-io/client";
 import { checkDatabase, checkQueue, type Queryable } from "@relay/db";
 import Fastify from "fastify";
 
 interface AppOptions {
   db: Queryable;
+  metricsRegistry?: Registry;
   version: string;
   commit: string;
   logLevel: string;
 }
 
-export function buildApp({ db, version, commit, logLevel }: AppOptions) {
+export function buildApp({ db, metricsRegistry, version, commit, logLevel }: AppOptions) {
   const app = Fastify({ logger: { level: logLevel } });
 
   app.get("/health", async (_request, reply) => {
@@ -29,6 +31,14 @@ export function buildApp({ db, version, commit, logLevel }: AppOptions) {
       queueDepth: queue.status === "ok" ? queue.depth : null,
     });
   });
+
+  if (metricsRegistry !== undefined) {
+    app.get("/metrics", async (_request, reply) =>
+      reply
+        .header("content-type", metricsRegistry.contentType)
+        .send(await metricsRegistry.metrics()),
+    );
+  }
 
   return app;
 }

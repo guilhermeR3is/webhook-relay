@@ -1,7 +1,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { encryptSecret, type Db, type SignatureScheme } from "@relay/db";
 import { startTestDatabase, type TestDatabase } from "@relay/db/testing";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 
 const encryptionKey = randomBytes(32);
@@ -261,5 +261,71 @@ describe("POST /in/:slug with a misconfigured endpoint", () => {
 
     expect(response.statusCode).toBe(500);
     expect(await countEvents("no-secret")).toBe(0);
+  });
+});
+
+describe("the ingest metrics", () => {
+  let metricsApp: ReturnType<typeof buildApp>;
+
+  beforeAll(async () => {
+    metricsApp = buildApp({
+      db,
+      encryptionKey,
+      demoEndpointSlug: "demo",
+      demoQuotaSalt: "test-salt-with-enough-characters",
+      panelOrigin: "http://localhost:3100",
+      exposeMetrics: true,
+      version: "test",
+      commit: "test",
+      logLevel: "silent",
+    });
+    await metricsApp.ready();
+  });
+
+  afterAll(async () => {
+    await metricsApp.close();
+  });
+
+  async function readMetric(line: string) {
+    const { body } = await metricsApp.inject({ method: "GET", url: "/metrics" });
+    const match = new RegExp(
+      `^${line.replace(/[{}"]/g, "\\$&")} (\\d+(?:\\.\\d+)?(?:e-\\d+)?)$`,
+      "m",
+    ).exec(body);
+    return match === null ? 0 : Number(match[1]);
+  }
+
+  it("counts each outcome of the route and times each answer by status code", async () => {
+    await createEndpoint("metered", "none", false);
+    await createEndpoint("metered-signed", "generic_hmac");
+    const send = (slug: string, headers: Record<string, string> = {}) =>
+      metricsApp.inject({
+        method: "POST",
+        url: `/in/${slug}`,
+        headers: { "content-type": "application/json", ...headers },
+        payload: '{"n":1}',
+      });
+
+    await send("metered");
+    await send("metered");
+    await send("metered-signed");
+    await send("metered-signed", { "x-signature-256": sign('{"n":1}') });
+    await send("nobody-here");
+
+    await vi.waitFor(async () => {
+      expect(await readMetric('relay_events_received_total{result="created"}')).toBe(2);
+      expect(await readMetric('relay_events_received_total{result="duplicate"}')).toBe(1);
+      expect(await readMetric('relay_events_received_total{result="invalid_signature"}')).toBe(1);
+      expect(await readMetric('relay_events_received_total{result="unknown_endpoint"}')).toBe(1);
+      expect(await readMetric('relay_ingest_duration_seconds_count{status_code="202"}')).toBe(2);
+      expect(await readMetric('relay_ingest_duration_seconds_count{status_code="200"}')).toBe(1);
+      expect(await readMetric('relay_ingest_duration_seconds_count{status_code="401"}')).toBe(1);
+      expect(await readMetric('relay_ingest_duration_seconds_count{status_code="404"}')).toBe(1);
+    });
+
+    const secondsSpent = await readMetric('relay_ingest_duration_seconds_sum{status_code="202"}');
+    expect(secondsSpent).toBeGreaterThan(0);
+    // em milissegundos a soma de duas respostas passaria de 1 com folga
+    expect(secondsSpent).toBeLessThan(1);
   });
 });

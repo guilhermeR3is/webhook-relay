@@ -44,6 +44,10 @@ const envSchema = z.object({
     .url()
     .transform((value) => new URL(value).origin)
     .default("http://localhost:3100"),
+  METRICS_ENABLED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   GIT_COMMIT: z.string().min(1).default("unknown"),
 });

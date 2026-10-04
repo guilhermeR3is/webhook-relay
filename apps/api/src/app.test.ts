@@ -3,7 +3,7 @@ import { createDb } from "@relay/db";
 import { describe, expect, it, vi } from "vitest";
 import { buildApp } from "./app.js";
 
-function buildTestApp(queryRaw: () => Promise<unknown>) {
+function buildTestApp(queryRaw: () => Promise<unknown>, exposeMetrics = false) {
   const db = createDb("postgresql://unused:unused@localhost:1/unused");
   vi.spyOn(db, "$queryRaw").mockImplementation(queryRaw as never);
   return buildApp({
@@ -14,6 +14,7 @@ function buildTestApp(queryRaw: () => Promise<unknown>) {
     panelOrigin: "http://localhost:3100",
     version: "1.2.3",
     commit: "a1b2c3d",
+    exposeMetrics,
     logLevel: "silent",
   });
 }
@@ -40,5 +41,27 @@ describe("GET /health", () => {
 
     expect(response.statusCode).toBe(503);
     expect(response.json()).toMatchObject({ status: "degraded", checks: { database: "error" } });
+  });
+});
+
+describe("GET /metrics", () => {
+  it("does not exist unless the app was built to expose it", async () => {
+    const app = buildTestApp(() => Promise.resolve([]));
+
+    const response = await app.inject({ method: "GET", url: "/metrics" });
+
+    expect(response.statusCode).toBe(404);
+  });
+
+  it("serves the ingest metrics and the process metrics in the Prometheus text format", async () => {
+    const app = buildTestApp(() => Promise.resolve([]), true);
+
+    const response = await app.inject({ method: "GET", url: "/metrics" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("text/plain");
+    expect(response.body).toContain("# TYPE relay_events_received_total counter");
+    expect(response.body).toContain("# TYPE relay_ingest_duration_seconds histogram");
+    expect(response.body).toContain("process_cpu_user_seconds_total");
   });
 });

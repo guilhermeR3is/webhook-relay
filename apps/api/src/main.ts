@@ -16,6 +16,7 @@ const app = buildApp({
   demoQuotaSalt: env.DEMO_QUOTA_SALT,
   panelOrigin: env.PANEL_ORIGIN,
   trustProxy: env.TRUST_PROXY,
+  exposeMetrics: env.METRICS_ENABLED,
   version,
   commit: env.GIT_COMMIT,
   logLevel: env.LOG_LEVEL,

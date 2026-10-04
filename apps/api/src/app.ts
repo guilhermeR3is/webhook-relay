@@ -2,6 +2,7 @@ import { checkDatabase, type Db, type DemoQuotaLimits } from "@relay/db";
 import Fastify from "fastify";
 import { flakyRoutes } from "./flaky.js";
 import { ingestRoutes } from "./ingest.js";
+import { createApiMetrics } from "./metrics.js";
 import { panelRoutes } from "./panel.js";
 import { DEMO_QUOTA_LIMITS, testEventRoutes } from "./test-event.js";
 
@@ -13,6 +14,7 @@ interface AppOptions {
   panelOrigin: string;
   demoQuotaLimits?: DemoQuotaLimits;
   trustProxy?: string[] | false;
+  exposeMetrics?: boolean;
   version: string;
   commit: string;
   logLevel: string;
@@ -26,6 +28,7 @@ export function buildApp({
   panelOrigin,
   demoQuotaLimits = DEMO_QUOTA_LIMITS,
   trustProxy = false,
+  exposeMetrics = false,
   version,
   commit,
   logLevel,
@@ -47,7 +50,16 @@ export function buildApp({
     });
   });
 
-  void app.register(ingestRoutes, { db, encryptionKey });
+  const metrics = createApiMetrics();
+  if (exposeMetrics) {
+    app.get("/metrics", async (_request, reply) =>
+      reply
+        .header("content-type", metrics.registry.contentType)
+        .send(await metrics.registry.metrics()),
+    );
+  }
+
+  void app.register(ingestRoutes, { db, encryptionKey, metrics });
   void app.register(panelRoutes, { db, demoEndpointSlug });
   void app.register(flakyRoutes, {});
   void app.register(testEventRoutes, {

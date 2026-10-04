@@ -18,6 +18,7 @@
     "tsx": "4.23.15"
   },
   "dependencies": {
+    "@prometheus-io/client": "0.16.1",
     "@relay/db": "workspace:*",
     "fastify": "5.12.5",
     "zod": "4.6.5"
