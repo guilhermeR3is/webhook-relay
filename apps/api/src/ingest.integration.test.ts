@@ -42,7 +42,16 @@ function countEvents(slug: string) {
 beforeAll(async () => {
   testDatabase = await startTestDatabase();
   db = testDatabase.db;
-  app = buildApp({ db, encryptionKey, version: "test", commit: "test", logLevel: "silent" });
+  app = buildApp({
+    db,
+    encryptionKey,
+    demoEndpointSlug: "demo",
+    demoQuotaSalt: "test-salt-with-enough-characters",
+    panelOrigin: "http://localhost:3100",
+    version: "test",
+    commit: "test",
+    logLevel: "silent",
+  });
   await app.ready();
 }, 120_000);
 

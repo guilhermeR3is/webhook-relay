@@ -12,6 +12,10 @@ const db = createDb(env.DATABASE_URL);
 const app = buildApp({
   db,
   encryptionKey: Buffer.from(env.ENCRYPTION_KEY, "base64"),
+  demoEndpointSlug: env.DEMO_ENDPOINT_SLUG,
+  demoQuotaSalt: env.DEMO_QUOTA_SALT,
+  panelOrigin: env.PANEL_ORIGIN,
+  trustProxy: env.TRUST_PROXY,
   version,
   commit: env.GIT_COMMIT,
   logLevel: env.LOG_LEVEL,

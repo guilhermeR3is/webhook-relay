@@ -188,3 +188,33 @@ describe("ingestEvent", () => {
     expect(await db.delivery.count({ where: { eventId } })).toBe(2);
   });
 });
+
+describe("event listing index", () => {
+  it("serves the newest-first order of the event list without sorting", async () => {
+    const listingEndpointId = await createEndpoint("listing");
+    await db.event.createMany({
+      data: Array.from({ length: 60 }, (_, index) => ({
+        endpointId: listingEndpointId,
+        idempotencyKey: `listing-${String(index)}`,
+        eventType: "push",
+        headers: {},
+        body: Buffer.from("{}"),
+        receivedAt: new Date(Date.UTC(2026, 9, 3, 12, 0, index % 20)),
+      })),
+    });
+
+    const plan = await db.$transaction(async (tx) => {
+      // com só 60 linhas o planejador prefere varrer a tabela, e o teste não provaria nada
+      await tx.$executeRawUnsafe("SET LOCAL enable_seqscan = off");
+      await tx.$executeRawUnsafe("SET LOCAL enable_bitmapscan = off");
+      const rows = await tx.$queryRaw<{ "QUERY PLAN": string }[]>`
+        EXPLAIN SELECT id FROM event
+        WHERE endpoint_id = ${listingEndpointId}::uuid
+        ORDER BY received_at DESC, id DESC LIMIT 20`;
+      return rows.map((row) => row["QUERY PLAN"]).join("\n");
+    });
+
+    expect(plan).toContain("event_endpoint_id_received_at_id_idx");
+    expect(plan).not.toContain("Sort");
+  });
+});

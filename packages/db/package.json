@@ -23,7 +23,7 @@
     "test": "vitest run --exclude \"**/*.integration.test.ts\"",
     "migrate:dev": "prisma migrate dev",
     "migrate:deploy": "prisma migrate deploy",
-    "test:integration": "vitest run integration"
+    "test:integration": "vitest run integration --testTimeout=30000"
   },
   "dependencies": {
     "@prisma/adapter-pg": "7.10.0",

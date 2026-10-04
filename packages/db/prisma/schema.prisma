@@ -70,6 +70,7 @@ model Event {
   deliveries Delivery[]
 
   @@unique([endpointId, idempotencyKey])
+  @@index([endpointId, receivedAt(sort: Desc), id(sort: Desc)])
   @@map("event")
 }
 
@@ -97,6 +98,7 @@ model Delivery {
   event       Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
   destination Destination @relation(fields: [destinationId], references: [id], onDelete: Restrict)
   attempts    Attempt[]
+  resends     Resend[]
 
   @@unique([eventId, destinationId])
   @@index([status, nextAttemptAt])
@@ -116,4 +118,34 @@ model Attempt {
 
   @@index([deliveryId, startedAt])
   @@map("attempt")
+}
+
+model Resend {
+  id             String   @id @default(uuid(7)) @db.Uuid
+  deliveryId     String   @map("delivery_id") @db.Uuid
+  requestedAt    DateTime @default(dbgenerated("CURRENT_TIMESTAMP")) @map("requested_at") @db.Timestamptz(3)
+  attemptsBefore Int      @map("attempts_before")
+
+  delivery Delivery @relation(fields: [deliveryId], references: [id], onDelete: Cascade)
+
+  @@index([deliveryId, requestedAt])
+  @@map("resend")
+}
+
+enum DemoQuotaKind {
+  ip
+  global
+
+  @@map("demo_quota_kind")
+}
+
+model DemoQuota {
+  id          String        @id @default(uuid(7)) @db.Uuid
+  kind        DemoQuotaKind
+  key         String
+  windowStart DateTime      @map("window_start") @db.Timestamptz(3)
+  count       Int           @default(0)
+
+  @@unique([kind, key, windowStart])
+  @@map("demo_quota")
 }

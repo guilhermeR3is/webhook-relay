@@ -71,6 +71,10 @@ services:
     build:
       context: .
       target: web
+    environment:
+      # o painel consulta a API pela rede do compose, pelo nome do serviço
+      API_URL: http://api:3000
+      PUBLIC_API_URL: http://localhost:3000
     ports:
       - "3100:3100"
     healthcheck:
@@ -79,7 +83,7 @@ services:
           "CMD",
           "node",
           "-e",
-          "fetch('http://127.0.0.1:3100').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
+          "fetch('http://127.0.0.1:3100/health').then((r) => process.exit(r.ok ? 0 : 1), () => process.exit(1))",
         ]
       interval: 10s
       timeout: 3s

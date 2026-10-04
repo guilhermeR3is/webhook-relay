@@ -1,6 +1,6 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import { seedDeliveries, startTestDatabase, type TestDatabase } from "@relay/db/testing";
-import { createDb, reserveDeliveries, type Db } from "@relay/db";
+import { createDb, reserveDeliveries, resendDeliveries, type Db } from "@relay/db";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { startDeliveryLoop, type SendDelivery } from "./delivery-loop.js";
 import type { PostResult } from "./post-webhook.js";
@@ -297,6 +297,31 @@ describe("what the loop does with each answer", () => {
     });
     expect(send).toHaveBeenCalledTimes(8);
     expect(await db.attempt.count({ where: { deliveryId: id } })).toBe(8);
+  });
+
+  it("delivers a dead delivery once it is resent, starting a fresh run of attempts at 1", async () => {
+    const id = await seedOneDelivery();
+    const failing = startLoop(() => Promise.resolve(answered(429, "0")));
+    await waitForStatus(id, "dead");
+    await failing.stop();
+    const { event } = await db.delivery.findUniqueOrThrow({
+      where: { id },
+      select: { event: { select: { endpointId: true } } },
+    });
+
+    const result = await resendDeliveries(db, {
+      endpointId: event.endpointId,
+      deliveryIds: [id],
+    });
+    startLoop(accepted);
+    const delivered = await waitForStatus(id, "succeeded");
+
+    expect(result.resent).toEqual([id]);
+    expect(delivered).toMatchObject({ attemptCount: 1, lastError: null });
+    expect(await db.attempt.count({ where: { deliveryId: id } })).toBe(9);
+    expect(await db.resend.findMany({ where: { deliveryId: id } })).toMatchObject([
+      { attemptsBefore: 8 },
+    ]);
   });
 
   it("on a 410 deactivates the destination and buries the deliveries still waiting for it", async () => {

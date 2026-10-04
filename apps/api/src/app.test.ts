@@ -9,6 +9,9 @@ function buildTestApp(queryRaw: () => Promise<unknown>) {
   return buildApp({
     db,
     encryptionKey: randomBytes(32),
+    demoEndpointSlug: "demo",
+    demoQuotaSalt: "test-salt-with-enough-characters",
+    panelOrigin: "http://localhost:3100",
     version: "1.2.3",
     commit: "a1b2c3d",
     logLevel: "silent",
