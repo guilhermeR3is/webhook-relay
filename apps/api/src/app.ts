@@ -35,6 +35,25 @@ export function buildApp({
 }: AppOptions) {
   const app = Fastify({ logger: { level: logLevel }, trustProxy });
 
+  // TEMPORÁRIO: diagnóstico do TRUST_PROXY no Render, só para chamadas com o cabeçalho de marca; remover depois
+  app.addHook("onRequest", (request, _reply, done) => {
+    if (request.headers["x-relay-diagnose"] === "1") {
+      request.log.info(
+        {
+          diagnose: {
+            ip: request.ip,
+            ips: request.ips,
+            protocol: request.protocol,
+            socket: request.socket.remoteAddress,
+            headers: request.headers,
+          },
+        },
+        "forwarding diagnosis",
+      );
+    }
+    done();
+  });
+
   app.get("/health", async (_request, reply) => {
     const database = await checkDatabase(db);
     if (database.status === "error") {
