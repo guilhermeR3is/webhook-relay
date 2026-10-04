@@ -30,6 +30,8 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # api e worker importam o dist do @relay/db, então ele precisa existir antes de lint, tipos e testes
       - run: pnpm --filter @relay/db build
+      # o PageProps das páginas do painel é gerado pelo next typegen, e o lint precisa dele pronto
+      - run: pnpm --filter @relay/web exec next typegen
       - run: pnpm lint
       - run: pnpm format:check
       - run: pnpm typecheck
