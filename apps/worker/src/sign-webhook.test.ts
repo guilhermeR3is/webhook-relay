@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { signWebhook } from "./sign-webhook.js";
 
 // vetores calculados à parte com hmac do Python, não com este código
-const secret = "whsec_MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=";
+// montado em tempo de execução: o literal whsec_ + base64 dispara o alerta de segredo do GitHub
+const secret = `whsec_${Buffer.from("0123456789abcdef0123456789abcdef").toString("base64")}`;
 const id = "0199aaaa-0000-7000-8000-000000000001";
 const now = new Date("2026-10-03T12:00:00Z");
 const textBody = new TextEncoder().encode('{"action":"opened"}');

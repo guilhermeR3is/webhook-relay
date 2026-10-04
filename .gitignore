@@ -14,3 +14,4 @@ coverage
 **/generated
 next-env.d.ts
 docs/estudos.md
+.playwright-mcp
