@@ -1,8 +1,105 @@
 # Webhook Relay
 
-Serviço que recebe webhooks de qualquer sistema (GitHub, gateway de pagamento, n8n) e garante a entrega aos destinos cadastrados. A entrada verifica a assinatura da origem e grava o evento uma única vez; um worker entrega a cada destino com retentativas, fila de mensagens mortas e disjuntor por destino.
+Recebe webhooks e garante que eles chegam ao destino, mesmo quando o destino está fora do ar: guarda cada evento, entrega com novas tentativas e deixa reenviar pelo painel o que não foi entregue.
 
-A garantia é de entrega **pelo menos uma vez**: todo evento aceito chega ao destino, mas pode chegar duas vezes (o destino processou e a resposta se perdeu na rede). Não há garantia de ordem.
+**Demonstração ao vivo:** https://relay-web-8q93.onrender.com. O botão "Enviar evento de teste" cria um evento e mostra as tentativas de entrega. O serviço roda no plano gratuito do Render e dorme quando ninguém o usa, então a primeira visita pode levar cerca de 1 minuto; o limite é de 5 testes por hora por visitante.
+
+![O botão de teste cria um evento, as duas primeiras tentativas falham com 503 e a terceira entrega](docs/images/demo-evento-de-teste.gif)
+
+O destino de teste falha de propósito em 40% das vezes. Na gravação acima o relay tentou três vezes: 503, 503 depois de 5 segundos e 200 depois de mais 16 segundos. A espera cresce a cada tentativa.
+
+## O problema
+
+Um webhook é uma mensagem que um sistema envia a outro, sozinho, quando algo acontece: o GitHub avisa quando alguém faz um push, um gateway de pagamento avisa que o pagamento foi aprovado. Quem recebe o aviso pode estar fora do ar, lento ou com erro naquele segundo, e quem envia quase nunca insiste: o GitHub espera 10 segundos e, se falhar, não tenta de novo. O evento se perde, e a loja nunca libera o produto que o cliente pagou. O mesmo aviso também pode chegar duas vezes, ou alguém pode fingir ser o remetente.
+
+## O que o relay faz
+
+Ele fica entre quem envia e o seu sistema:
+
+1. responde ao aviso em poucos milissegundos e confere a assinatura, para recusar avisos falsos;
+2. grava o evento no banco, então ele não se perde mais, mesmo se tudo cair depois;
+3. entrega a cada destino cadastrado, e se falhar tenta de novo, esperando mais a cada vez;
+4. separa numa fila de mensagens mortas o que não conseguiu entregar, e deixa reenviar pelo painel;
+5. mostra eventos, tentativas e o estado de cada destino no painel, e expõe métricas.
+
+A garantia é de entrega **pelo menos uma vez**: todo evento aceito (resposta 202) chega ao destino, mas pode chegar duas vezes (o destino processou e a resposta se perdeu na rede). Por isso toda entrega leva um `webhook-id` que não muda entre as tentativas, e o destino precisa ignorar os repetidos. Não há garantia de ordem. A garantia começa depois do 202: se o remetente não consegue nem entregar ao relay, o relay não tem como saber.
+
+## Como funciona
+
+```mermaid
+flowchart LR
+    origem["GitHub, gateway de pagamento, n8n"]
+    api["API<br/>POST /in/:slug"]
+    banco[("PostgreSQL<br/>eventos, entregas, tentativas")]
+    worker["Worker<br/>entrega e tenta de novo"]
+    destino["Destinos"]
+    painel["Painel<br/>eventos, mortas, destinos"]
+
+    origem -->|"webhook assinado"| api
+    api -->|"evento e entregas, na mesma transação"| banco
+    worker -->|"reserva com FOR UPDATE SKIP LOCKED"| banco
+    worker -->|"POST assinado"| destino
+    painel -->|"consulta e reenvio"| api
+```
+
+- **API** (`apps/api`): confere a assinatura em tempo constante, grava o evento e cria uma entrega para cada destino inscrito naquele tipo de evento, tudo na mesma transação. Um evento repetido responde 200 com o id original, sem duplicar: quem decide é a restrição única do banco.
+- **Postgres** (`packages/db`): guarda eventos, entregas e tentativas e serve de fila. O worker reserva as entregas vencidas com `FOR UPDATE SKIP LOCKED` e marca um prazo de posse de 60 segundos; se o worker morrer, outro pega a entrega quando o prazo expira.
+- **Worker** (`apps/worker`): envia o corpo exatamente como chegou, assinado com o segredo do destino, com limite de 10 segundos e sem seguir redirecionamentos. Em produção recusa destinos que resolvem para endereços privados, de loopback ou de link-local.
+- **Painel** (`apps/web`): lista os eventos, mostra a linha do tempo de tentativas de cada entrega, reenvia entregas mortas (uma ou em lote) e mostra o estado do disjuntor de cada destino.
+- **Servidor de produção** (`apps/server`): junta a API, o worker e a limpeza dos dados de demonstração num só processo, porque o plano gratuito do Render não oferece worker separado. Em desenvolvimento a API e o worker rodam separados.
+
+## O ciclo de uma entrega
+
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> pending: evento aceito
+    pending --> in_progress: worker reserva
+    in_progress --> succeeded: destino responde 2xx
+    in_progress --> pending: falha temporária
+    in_progress --> pending: posse vence
+    in_progress --> dead: erro definitivo
+    dead --> pending: reenvio pelo painel
+    succeeded --> [*]
+```
+
+| Resposta do destino                      | O que acontece                                                                                  |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| 2xx                                      | entregue                                                                                        |
+| 5xx, 408, tempo esgotado ou erro de rede | tenta de novo; conta como falha do destino para o disjuntor                                     |
+| 429                                      | tenta de novo respeitando o `Retry-After`; não conta como falha                                 |
+| 410                                      | vai para as mortas e o destino é desativado                                                     |
+| outros 4xx e qualquer 3xx                | vai direto para as mortas: repetir daria a mesma resposta, e redirecionamentos não são seguidos |
+| depois de 8 tentativas                   | vai para as mortas                                                                              |
+
+A espera entre as tentativas cresce de forma exponencial, com jitter completo (um valor aleatório até o teto de cada tentativa, para os envios não se sincronizarem): teto de 10 segundos na primeira, dobrando a cada vez, até 1 hora. O disjuntor de cada destino abre depois de 5 falhas seguidas e fica aberto por 5 minutos, reagendando as entregas sem chamar o destino; depois uma única tentativa de teste decide se ele volta a fechar.
+
+## Resultados
+
+Medidos no meu computador, com tudo em contêineres na mesma máquina (detalhes em [Carga e caos](#carga-e-caos)):
+
+- **200 requisições por segundo durante 2 minutos:** p95 da entrada de 3,24 ms, nenhuma falha.
+- **Teste de caos:** derrubei o worker com `docker kill` no meio da carga. Zero eventos perdidos e 10 entregas duplicadas, que é o preço da garantia pelo menos uma vez.
+- **Testes:** mais de 1.100, boa parte com Postgres real em contêiner (Testcontainers).
+
+## Decisões de projeto
+
+- **Postgres como fila, e não Redis ou RabbitMQ.** Menos peças para operar, e o evento e as suas entregas entram na mesma transação: ou o evento é aceito com todas as entregas, ou nada é gravado. O limite é volume muito alto, em que uma fila dedicada passa a valer a pena.
+- **Pelo menos uma vez, e não exatamente uma vez.** Quando a resposta do destino se perde na rede, o relay não sabe se ele processou. Reenviar arrisca uma duplicada, e não reenviar arrisca perder o evento; o relay escolhe a duplicada e deixa o destino ignorar o `webhook-id` repetido.
+- **Sem garantia de ordem.** Vários workers reservam entregas ao mesmo tempo, e uma entrega que falha volta mais tarde, então uma entrega posterior pode chegar antes de uma anterior. Garantir a ordem exigiria entregar um evento de cada vez por destino e custaria vazão. Quem precisa de ordem deve ordenar pelos dados do próprio evento.
+- **Idempotência pelo banco.** Dois pedidos iguais ao mesmo tempo passariam juntos por um `SELECT` antes do `INSERT`; a restrição única do banco é atômica e decide sozinha.
+- **O corpo é guardado como bytes.** A assinatura da origem cobre os bytes exatos, e o destino confere a nossa assinatura sobre os mesmos bytes: guardar o JSON já interpretado e serializá-lo de novo mudaria o conteúdo e quebraria as duas.
+
+## Limites conhecidos
+
+- No plano gratuito o serviço dorme. A primeira entrega do GitHub depois disso falha (ele espera 10 segundos e não tenta de novo sozinho) e precisa ser reenviada pelo GitHub.
+- O relay só repassa ao destino o corpo, o `content-type` e os cabeçalhos `webhook-*`; os cabeçalhos da origem, como `x-github-event`, ficam guardados, mas não vão adiante. Por isso um destino se inscreve nos tipos de evento que quer receber.
+- O painel mostra só o endpoint de demonstração, e não há rota de administração: endpoints e destinos são cadastrados por comando.
+- A causa das rajadas de latência vistas no teste de carga não foi identificada (veja [Carga e caos](#carga-e-caos)).
+
+## Tecnologias
+
+Node.js 24, TypeScript, Fastify 5, PostgreSQL 17, Prisma 7, Next.js 16 com shadcn/ui, pnpm workspaces, Docker, Prometheus e Grafana, k6, Vitest com Testcontainers e GitHub Actions. Publicado no Render e no Neon, nos planos gratuitos.
 
 ## Como rodar localmente
 
@@ -11,15 +108,30 @@ Precisa de Node 24, pnpm 11 e Docker.
 ```sh
 cp .env.example .env
 # preencha ENCRYPTION_KEY com o resultado de: openssl rand -base64 32
+# preencha DEMO_QUOTA_SALT com o resultado de: openssl rand -base64 24
 docker compose up -d postgres
 pnpm install
 pnpm --filter @relay/db build
 pnpm --filter @relay/db migrate:deploy
+pnpm seed:demo                    # cria o endpoint "demo" e o destino de teste; mostra o segredo uma vez
 pnpm --filter @relay/api dev
 pnpm --filter @relay/worker dev   # em outro terminal
+pnpm --filter @relay/web dev      # em outro terminal; abra http://localhost:3100 (por localhost, não por 127.0.0.1)
 ```
 
-Ainda não existe rota nem tela para cadastrar endpoints e destinos; isso chega com o painel e o seed de demonstração.
+Para cadastrar os seus próprios endpoints e destinos:
+
+```sh
+pnpm endpoint:add --slug github --scheme github \
+  --destination-url https://exemplo.com/webhook --event-types push
+```
+
+O comando imprime os segredos uma única vez; o banco só guarda a versão cifrada.
+
+## Publicação e exemplo com n8n
+
+- [docs/publicacao.md](docs/publicacao.md): como publicar no Render e no Neon, passo a passo, e o valor de `TRUST_PROXY` medido no Render.
+- [docs/n8n.md](docs/n8n.md): o GitHub entregando eventos de push a um fluxo do n8n pelo relay, com um fluxo importável que ignora entregas repetidas. Foi testado de ponta a ponta com um n8n rodando localmente; o teste com o GitHub de verdade ainda não foi feito.
 
 ## Métricas
 
