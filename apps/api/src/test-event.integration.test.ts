@@ -289,6 +289,31 @@ describe("POST /panel/test-event, which address is the visitor's", () => {
     expect(viaName.statusCode).toBe(429);
     expect(outside.statusCode).toBe(201);
   });
+
+  // a cadeia medida no log do Render: visitante, borda do Cloudflare e salto interno, via proxy local
+  it("finds the visitor behind the Render chain even when the caller forges the start of it", async () => {
+    const { app } = await createScenario({
+      trustProxy: ["loopback", "uniquelocal", "162.158.0.0/15", "172.64.0.0/13"],
+    });
+    const visitorA = freshAddress();
+    const visitorB = freshAddress();
+    const edges = ["162.159.115.35", "172.71.238.63", "172.69.11.140", "162.158.1.1", "172.70.2.2"];
+    for (const [click, edge] of edges.entries()) {
+      await clickFrom(app, "127.0.0.1", {
+        "x-forwarded-for": `9.9.9.${String(click)}, ${visitorA}, ${edge}, 10.24.0.151`,
+      });
+    }
+
+    const blocked = await clickFrom(app, "127.0.0.1", {
+      "x-forwarded-for": `9.9.9.99, ${visitorA}, 172.69.11.140, 10.24.0.151`,
+    });
+    const other = await clickFrom(app, "127.0.0.1", {
+      "x-forwarded-for": `${visitorB}, 162.159.115.35, 10.24.0.151`,
+    });
+
+    expect(blocked.statusCode).toBe(429);
+    expect(other.statusCode).toBe(201);
+  });
 });
 
 describe("POST /panel/test-event, the panel and the demo endpoint", () => {

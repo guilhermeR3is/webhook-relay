@@ -45,7 +45,7 @@ A variável digitada no terminal vence a do `.env` local. As imagens não trazem
 | `relay-web`    | `API_URL`        | endereço público da API, por exemplo `https://relay-server.onrender.com` |
 | `relay-web`    | `PUBLIC_API_URL` | o mesmo endereço da API                                                  |
 
-O `DEMO_QUOTA_SALT` o Render gera sozinho. Se um nome já estiver em uso, o Render troca o endereço: depois de criar, confira os endereços reais no painel do Render e corrija as três variáveis de endereço. 4. **Não** defina `METRICS_ENABLED`, `ALLOW_PRIVATE_DESTINATIONS` nem `TRUST_PROXY` agora. Os dois primeiros ficam no padrão (desligados) em produção, e o terceiro é descoberto no passo 6.
+O `DEMO_QUOTA_SALT` o Render gera sozinho. Se um nome já estiver em uso, o Render troca o endereço: depois de criar, confira os endereços reais no painel do Render e corrija as três variáveis de endereço. 4. **Não** defina `METRICS_ENABLED` nem `ALLOW_PRIVATE_DESTINATIONS`: ficam no padrão (desligados) em produção. O `TRUST_PROXY` entra no passo 6, depois que os serviços estiverem no ar.
 
 O `autoDeployTrigger: checksPass` faz o Render publicar só commits com o CI verde.
 
@@ -71,13 +71,28 @@ O comando recria o endpoint `demo` do zero e imprime o `endpointSecret` uma úni
 
 Para acordar a demonstração antes de um visitante chegar, o portfólio pode chamar o `/health` dos dois serviços quando a página é aberta.
 
-## 6. TRUST_PROXY (descobrir com o serviço publicado)
+## 6. TRUST_PROXY
 
-A API só confia no `X-Forwarded-For` dos proxies listados em `TRUST_PROXY`; vazio, ela enxerga o endereço do proxy do Render como se fosse o visitante, e todos dividem a mesma cota de 5 eventos por hora (a cota global de 200 por dia continua protegendo). A documentação do Render não diz quais cabeçalhos ele manda nem quais são os endereços dos proxies, então o valor precisa ser descoberto testando:
+A API só confia no `X-Forwarded-For` dos proxies listados em `TRUST_PROXY`. Vazio, ela enxerga o endereço do proxy do Render como se fosse o visitante, e todos dividem a mesma cota de 5 eventos por hora (a cota global de 200 por dia continua protegendo). Defina a variável no `relay-server`, numa linha só, sem espaços e sem aspas:
 
-1. Com `TRUST_PROXY` vazio, faça uma requisição e veja nos logs do Render o `remoteAddress` dela: é o endereço do proxy.
-2. Defina `TRUST_PROXY` com esse endereço (ou com `uniquelocal`, se for um endereço privado) e publique de novo.
-3. Confirme que o `X-Forwarded-For` forjado não vale: mande o botão de teste mais de 5 vezes na mesma hora, cada uma com um `X-Forwarded-For` diferente. A sexta tem que devolver 429 com `scope: "ip"`; se todas passarem, o cabeçalho forjado está sendo aceito e o valor está largo demais.
+```
+loopback,uniquelocal,173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22,2400:cb00::/32,2606:4700::/32,2803:f800::/32,2405:b500::/32,2405:8100::/32,2a06:98c0::/29,2c0f:f248::/32
+```
+
+Por que esse valor: a documentação do Render não diz como o endereço do visitante chega, então ele foi medido no serviço publicado. Uma chamada de visitante chega ao processo pelo proxy local do container (`127.0.0.1`), e o `X-Forwarded-For` vem como `visitante, borda do Cloudflare, salto interno do Render`, por exemplo `177.41.211.90, 162.159.115.35, 10.24.0.151`. O proxy do Render não limpa o cabeçalho que o visitante manda: ele só acrescenta endereços no fim, e um endereço forjado fica no começo da lista (`9.9.9.9, 177.41.211.90, ...`). Por isso a API precisa confiar nos três tipos de salto (`loopback`, `uniquelocal` para a rede interna e as faixas do Cloudflare) e parar no primeiro endereço que não é de confiança, lendo a lista da direita para a esquerda: esse é o visitante, e o que vem antes dele é ignorado.
+
+As faixas são as publicadas em `https://www.cloudflare.com/ips-v4` e `https://www.cloudflare.com/ips-v6`. Se o Cloudflare as mudar, atualize o valor.
+
+Como conferir: do seu computador, mande o botão de teste 6 vezes na mesma hora, cada vez com um `X-Forwarded-For` diferente.
+
+```sh
+for i in 1 2 3 4 5 6; do
+  curl -4 -s -o /dev/null -w '%{http_code}\n' -X POST -H "X-Forwarded-For: 9.9.9.$i" \
+    -H "Origin: https://<relay-web>.onrender.com" https://<relay-server>.onrender.com/panel/test-event
+done
+```
+
+O esperado é 201 cinco vezes e 429 na sexta: o endereço forjado não troca a cota. Para ver que cada visitante tem a cota dele, use o botão do painel pelo celular, no 4G e com o Wi-Fi desligado, depois de esgotar a cota do computador: o do celular deve funcionar. Os nomes `onrender.com` só têm endereço IPv4, então `curl -6` não serve de segundo visitante: ele usa o mesmo endereço IPv4.
 
 ## Assinar uma chamada a `/in/demo`
 
@@ -96,12 +111,13 @@ curl -X POST "https://relay-server.onrender.com/in/demo" \
 
 Crie outro projeto no Neon, troque o `DATABASE_URL` no Render pelo novo endereço pooled e repita os passos 2 e 4 com o novo endereço direto. Os endpoints e destinos não ficam no repositório: o `seed:demo` recria a demonstração e o `pnpm endpoint:add` recria os outros, como o do GitHub com n8n descrito em `docs/n8n.md`.
 
-## O que só se confirma publicando
+## O que foi confirmado publicando
 
-Estes pontos foram preparados e testados localmente, mas dependem do Render e ficam sem confirmação até a primeira publicação:
+Estes pontos dependiam do Render e foram conferidos no serviço publicado:
 
-- o Render repassa `RELAY_TARGET` como argumento de build e escolhe a imagem certa (localmente, `docker build --build-arg RELAY_TARGET=web .` e o padrão geram as imagens esperadas);
-- a região `ohio` existe no plano gratuito;
-- os endereços reais dos serviços;
-- o valor de `TRUST_PROXY`;
-- o caminho https do destino com a proteção contra SSRF (a consulta de DNS guardada), que só se valida contra um destino público de verdade, como o próprio `/demo/flaky` publicado.
+- o Render repassa `RELAY_TARGET` como argumento de build e cada serviço sobe a imagem certa;
+- o `/health` da API mostra o commit publicado (`RENDER_GIT_COMMIT`) e o banco do Neon pelo endereço pooled;
+- o botão de teste funciona com a origem real do painel, e o worker entrega ao `/demo/flaky` pelo endereço HTTPS público, com a proteção contra SSRF ativa, o limite de 10 segundos e a nova tentativa;
+- o valor de `TRUST_PROXY` do passo 6.
+
+O que continua sem confirmação: a tela de webhook do GitHub e o exemplo do n8n com um n8n público (`docs/n8n.md`).
